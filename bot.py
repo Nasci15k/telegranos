@@ -1,6 +1,6 @@
 '''
 Bot de Consultas Profissional para Telegram
-Funcionalidades: Menus Inline, Consolidação SPC, Exportação para PDF, Variáveis de Ambiente.
+Funcionalidades: Menus Inline, Consolidação SPC, Exportação para PDF, Variáveis de Ambiente, Modo Webhook para Render Gratuito.
 '''
 import logging
 import json
@@ -8,9 +8,9 @@ import requests
 import io
 import time
 import os
-import asyncio # Adicionado para o modo Webhook/Render Gratuito
+import asyncio # Essencial para o modo Webhook e Render
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
@@ -24,45 +24,38 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configurações e Tokens (Lendo de Variáveis de Ambiente) ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "7564936099:AAGXt1WXFA2j_rgZGHdGZo696Hq6v-0WW3w")
-FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "FB-E6D2-0330-1561-8E5E")
+# ATENÇÃO: Substitua os valores de exemplo por suas chaves reais
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
+FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "SEU_FETCHBRASIL_TOKEN_AQUI")
 BASE_URL_APIS_BRASIL = os.environ.get("BASE_URL_APIS_BRASIL", "https://apis-brasil.shop/apis/")
 BASE_URL_FETCHBRASIL = os.environ.get("BASE_URL_FETCHBRASIL", "https://api.fetchbrasil.com.br/")
 
-# --- Funções Auxiliares ---
+# --- Funções Auxiliares (Formatação Minimalista) ---
 
 def format_json_to_markdown(data, indent=0):
-    """Formata um objeto JSON (dict ou list) em uma string Markdown minimalista."""
+    """Formata um objeto JSON (dict ou list) em uma string Markdown minimalista e profissional."""
     if not isinstance(data, (dict, list)) or not data:
         return ""
 
     markdown_text = ""
-    # Indentação minimalista (2 espaços por nível)
     indent_str = "  " * indent
 
     if isinstance(data, dict):
         for key, value in data.items():
             key_title = key.replace('_', ' ').strip().title()
-            # Verifica se o valor é vazio ou nulo
             is_empty = value in [None, "", "null"] or (isinstance(value, (list, dict)) and not value)
             
             if isinstance(value, (dict, list)) and value:
-                # Chave para o objeto/lista aninhada
                 markdown_text += f"{indent_str}*{key_title}*:\n{format_json_to_markdown(value, indent + 1)}"
             elif not is_empty:
-                # Par Chave: Valor
                 value_str = str(value)
                 markdown_text += f"{indent_str}*{key_title}*: `{value_str}`\n"
-            # Se for 'is_empty', não exibe a linha (minimalista)
 
     elif isinstance(data, list):
-        # Para listas, usar um hífen simples para cada item
         for item in data:
             if isinstance(item, (dict, list)):
-                # Se o item for um objeto, introduz com hífen e indenta o conteúdo
                 markdown_text += f"{indent_str}-\n{format_json_to_markdown(item, indent + 1)}"
             else:
-                # Se for um valor simples na lista
                 markdown_text += f"{indent_str}- `{str(item)}`\n"
 
     return markdown_text
@@ -81,9 +74,7 @@ def format_json_to_pdf(data, styles, elements, doc):
                 elements.append(Paragraph(f"<b>{key_title}:</b> {str(value)}", styles['Normal']))
     
     elif isinstance(data, list):
-        # Para listas, cria uma tabela ou lista simples
         if all(isinstance(item, dict) for item in data) and data:
-            # Tenta criar uma tabela se todos os itens forem dicionários
             headers = set()
             for item in data:
                 headers.update(item.keys())
@@ -106,10 +97,8 @@ def format_json_to_pdf(data, styles, elements, doc):
                 ('GRID', (0, 0), (-1, -1), 1, colors.black)
             ]))
             elements.append(table)
-            elements.append(Spacer(1, 0.2*inch)) # Espaçamento após a tabela
-        
+            elements.append(Spacer(1, 0.2*inch))
         else:
-            # Lista simples para itens não-dicionário ou misturados
             for i, item in enumerate(data):
                 if isinstance(item, (dict, list)):
                     elements.append(Paragraph(f"Item {i+1}:", styles['Normal']))
@@ -125,15 +114,11 @@ def generate_pdf(title, data):
     styles = getSampleStyleSheet()
     elements = []
 
-    # Título
     elements.append(Paragraph(f"<b>Relatório de Consulta: {title}</b>", styles['h1']))
     elements.append(Spacer(1, 0.3 * inch))
-
-    # Data e Hora
     elements.append(Paragraph(f"Data da Geração: {time.strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
     elements.append(Spacer(1, 0.2 * inch))
 
-    # Conteúdo da API
     format_json_to_pdf(data, styles, elements, doc)
     
     doc.build(elements)
@@ -146,8 +131,8 @@ def fetch_api(url, params=None):
     """Função genérica para requisitar qualquer URL de API e retornar o JSON."""
     logger.info(f"Requisitando API: {url} com params: {params}")
     try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status() # Lança HTTPError para 4xx/5xx
+        response = requests.get(url, params=params, timeout=40) # Timeout aumentado
+        response.raise_for_status() 
         return response.json()
     except requests.exceptions.HTTPError as errh:
         logger.error(f"HTTP Error: {errh}")
@@ -157,7 +142,7 @@ def fetch_api(url, params=None):
         return {"status": "ERROR", "message": "Erro de Conexão: Não foi possível se conectar à API."}
     except requests.exceptions.Timeout as errt:
         logger.error(f"Timeout Error: {errt}")
-        return {"status": "ERROR", "message": "Erro de Tempo Limite: A API demorou muito para responder (30s)."}
+        return {"status": "ERROR", "message": "Erro de Tempo Limite: A API demorou muito para responder (40s)."}
     except requests.exceptions.RequestException as err:
         logger.error(f"API Request Error: {err}")
         return {"status": "ERROR", "message": f"Erro Desconhecido na Requisição: {err}"}
@@ -189,7 +174,7 @@ api_map = {
     "api_serpro_placa": (lambda q: fetch_apis_brasil("apiserpro.php", "placa", q), "Serpro Placa"),
 
     # SPC/APIS BRASIL (Exemplo: SPC Consolidado)
-    "api_spc": (lambda q: fetch_apis_brasil("apicpf27spc.php", "cpf", q), "SPC Consolidado"), # Usando 27spc como consolidado
+    "api_spc": (lambda q: fetch_apis_brasil("apicpf27spc.php", "cpf", q), "SPC Consolidado"), 
 
     # Outras APIS BRASIL
     "api_datasuscpf": (lambda q: fetch_apis_brasil("apicpfdatasus.php", "cpf", q), "Datasus CPF"),
@@ -235,17 +220,19 @@ async def menu_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         query = extract_query(update.message.text)
         if not query:
-            await update.message.reply_text(f"⚠️ Por favor, informe o {title}. Exemplo: /{context.args[0]} `<{title}>`")
+            command_name = update.message.text.split()[0].split('@')[0]
+            await update.message.reply_text(f"⚠️ Por favor, informe o {title}. Exemplo: `{command_name} <{title}>`", parse_mode='Markdown')
             return
 
+        # Salva a query na sessão do usuário (Importante para os callbacks)
         context.user_data['last_query'] = query
+        context.user_data['last_query_title'] = title
         
         keyboard = []
         row = []
         for i, (text, callback_data) in enumerate(buttons_data):
-            # O callback_data precisa ser único para o handler
             row.append(InlineKeyboardButton(text, callback_data=callback_data))
-            if len(row) == 3 or i == len(buttons_data) - 1: # 3 botões por linha
+            if len(row) == 3 or i == len(buttons_data) - 1:
                 keyboard.append(row)
                 row = []
 
@@ -261,24 +248,24 @@ async def simple_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         query = extract_query(update.message.text)
         if not query:
-            await update.message.reply_text(f"⚠️ Por favor, informe o {title}. Exemplo: /{context.args[0]} `<{title}>`")
+            command_name = update.message.text.split()[0].split('@')[0]
+            await update.message.reply_text(f"⚠️ Por favor, informe o {title}. Exemplo: `{command_name} <{title}>`", parse_mode='Markdown')
             return
 
         await update.message.reply_text(f"⏳ Consultando {api_name} para **`{query}`**...", parse_mode='Markdown')
 
         data = await handle_api_call(query, fetch_func, title, api_name, update)
         
-        # Se os dados vieram, enviamos a resposta e o PDF.
         if data:
             markdown_output = format_json_to_markdown(data)
-            await update.message.reply_text(f"✅ *Resultado da Consulta - {api_name}*\n\n{markdown_output}", parse_mode='Markdown')
             
-            # Gera e envia o PDF
+            # Gera e envia o PDF em sequência
             pdf_buffer = generate_pdf(f"{title} - {query} ({api_name})", data)
             await update.message.reply_document(
                 document=pdf_buffer.getvalue(),
                 filename=f"{title}_{query}_{api_name}.pdf",
-                caption=f"PDF da consulta {api_name} para {query}"
+                caption=f"✅ *Resultado da Consulta - {api_name}*\n\n{markdown_output}",
+                parse_mode='Markdown'
             )
 
     except Exception as e:
@@ -290,38 +277,34 @@ async def simple_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_api_call(query: str, fetch_func, title: str, api_name: str, update: Update) -> dict:
     """Função para chamar a API e tratar erros de forma unificada."""
     
-    # Chamada de API Sincrona (usando time.sleep para evitar problemas de concorrência)
-    # Em produção, um Executor ou asyncio.to_thread seria mais adequado.
-    # Para o escopo deste bot, a chamada síncrona dentro da coroutine é aceitável.
+    # As chamadas de requests.get são síncronas e bloqueantes
+    # Em um ambiente asyncio, é melhor usar asyncio.to_thread para não bloquear o event loop
+    data = await asyncio.to_thread(fetch_func, query)
     
-    start_time = time.time()
-    data = fetch_func(query)
-    end_time = time.time()
-
-    logger.info(f"API {api_name} para {query} finalizada em {end_time - start_time:.2f}s.")
-
-    if data.get("status") == "ERROR" or 'message' in data.keys() and 'Erro' in data['message']:
+    if data.get("status") == "ERROR" or ('message' in data and 'Erro' in data['message']) or ('code' in data and data['code'] in [203, 404]):
         error_message = data.get("message", "Detalhe de erro desconhecido.")
-        await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
-        return None
-    
-    # Se o FetchBrasil retornar 'nenhum resultado' ou similar
-    if data.get("code") == 203 or data.get("status") == 404:
-        await update.effective_message.reply_text(f"⚠️ *Consulta - {api_name}*\n\nNenhum resultado encontrado para `{query}`.", parse_mode='Markdown')
+        # Se for um erro HTTP, use a mensagem de erro da requisição
+        if data.get("status") == "ERROR":
+            await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
+        # Se for "Nenhum resultado", use uma mensagem mais amigável
+        elif data.get("code") in [203, 404]:
+            await update.effective_message.reply_text(f"⚠️ *Consulta - {api_name}*\n\nNenhum resultado encontrado para `{query}`.", parse_mode='Markdown')
+        else:
+            await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
         return None
 
     return data
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Trata cliques nos botões inline."""
+    """Trata cliques nos botões inline de consulta."""
     query_obj = update.callback_query
-    await query_obj.answer() # Fecha o pop-up de carregamento no Telegram
+    await query_obj.answer()
     
     callback_data = query_obj.data
     api_info = api_map.get(callback_data)
 
-    # Verifica se a query anterior está salva
     query = context.user_data.get('last_query')
+    query_title = context.user_data.get('last_query_title', "Consulta")
     
     if not api_info or not query:
         await query_obj.edit_message_text(text="❌ API desconhecida ou a sessão expirou. Por favor, reinicie a consulta com o comando (ex: /cpf).")
@@ -333,11 +316,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query_obj.edit_message_text(f"⏳ Consultando {api_name} para **`{query}`**...", parse_mode='Markdown')
 
     # Chama a função de API
-    data = await handle_api_call(query, fetch_func, "Consulta", api_name, update)
+    data = await handle_api_call(query, fetch_func, query_title, api_name, update)
     
-    # Se os dados vieram, enviamos a resposta e o PDF.
     if data:
-        # Formata o resultado
+        # Salva o último resultado para o PDF (otimização)
+        context.user_data[f'result_{callback_data}'] = data
+        
         markdown_output = format_json_to_markdown(data)
         
         # Cria a mensagem final com o botão de PDF
@@ -351,11 +335,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode='Markdown'
         )
 
-    elif not data:
-        # Se houve erro e handle_api_call enviou a mensagem de erro, 
-        # apenas atualiza a mensagem original para evitar loop
-        await query_obj.edit_message_text(text=f"❌ Erro ao consultar {api_name}. Veja a mensagem de erro acima.")
-
+    else:
+        # Se houve erro no handle_api_call, ele já enviou uma mensagem de erro
+        # Apenas atualiza a mensagem original para evitar o "loading" infinito
+        await query_obj.edit_message_text(f"❌ Ocorreu um erro ao consultar {api_name}. Verifique o erro detalhado acima ou tente outra API.")
 
 # --- Handler de Geração de PDF ---
 
@@ -364,38 +347,38 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query_obj = update.callback_query
     await query_obj.answer("Gerando PDF...")
 
-    callback_data = query_obj.data.replace("pdf_", "")
-    api_info = api_map.get(callback_data)
+    callback_data_api = query_obj.data.replace("pdf_", "")
+    api_info = api_map.get(callback_data_api)
     query = context.user_data.get('last_query')
+    query_title = context.user_data.get('last_query_title', "Consulta")
+    data = context.user_data.get(f'result_{callback_data_api}')
 
-    if not api_info or not query:
-        await query_obj.message.reply_text("❌ Não foi possível gerar o PDF. Sessão expirada ou dados ausentes.")
-        return
+    if not api_info or not query or not data:
+        await query_obj.message.reply_text("❌ Não foi possível gerar o PDF. A sessão expirou ou os dados da consulta foram perdidos.")
+        # Se os dados foram perdidos, tenta buscar novamente
+        if api_info and query:
+            await query_obj.message.reply_text("Tentando buscar os dados novamente para gerar o PDF...")
+            fetch_func, api_name = api_info
+            data = await handle_api_call(query, fetch_func, query_title, api_name, update)
+            if not data: return # Falhou de novo
+            context.user_data[f'result_{callback_data_api}'] = data # Salva para o futuro
 
     fetch_func, api_name = api_info
     
     # Edita a mensagem para mostrar o status
     await query_obj.edit_message_text(f"⏳ Gerando PDF para {api_name}...", parse_mode='Markdown')
     
-    # Requisita a API novamente (necessário se o resultado não foi salvo)
-    # *Em um ambiente de produção ideal, o resultado da API seria salvo no user_data*
-    data = fetch_func(query) 
-
-    if data.get("status") == "ERROR":
-        await query_obj.message.reply_text(f"❌ Não foi possível obter os dados novamente para o PDF. Erro: {data.get('message')}")
-        return
-
     # Gera e envia o PDF
     pdf_buffer = generate_pdf(f"Consulta {api_name} - {query}", data)
     await query_obj.message.reply_document(
         document=pdf_buffer.getvalue(),
         filename=f"{api_name.replace(' ', '_')}_{query}.pdf",
-        caption=f"PDF da consulta {api_name} para {query}"
+        caption=f"✅ PDF gerado com sucesso para {query}"
     )
     
-    # Volta a mensagem original
+    # Volta a mensagem original (incluindo o botão de PDF)
     markdown_output = format_json_to_markdown(data)
-    keyboard = [[InlineKeyboardButton("📥 Gerar PDF", callback_data=f"pdf_{callback_data}")]]
+    keyboard = [[InlineKeyboardButton("📥 Gerar PDF", callback_data=f"pdf_{callback_data_api}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query_obj.edit_message_text(
@@ -434,44 +417,43 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CallbackQueryHandler(pdf_callback, pattern='^pdf_'))
     application.add_handler(CallbackQueryHandler(button_callback))
 
-
     logger.info("Handlers registrados com sucesso.")
 
 async def main() -> None:
     """Inicia o bot (Modo Webhook para Render Gratuito ou Polling Local)."""
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN não configurado. O bot não pode ser iniciado.")
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "SEU_TELEGRAM_TOKEN_AQUI":
+        logger.error("TELEGRAM_TOKEN não configurado. O bot não pode ser iniciado. Atualize a variável TELEGRAM_TOKEN.")
         return
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Registra os comandos
-    register_handlers(application)
+    # 🚨 CORREÇÃO ESSENCIAL PARA RENDER: Usando 'async with'
+    async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
+        
+        register_handlers(application)
 
-    # --- Configuração do Webhook para Render ---
-    PORT = int(os.environ.get("PORT", 8080))
-    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+        # --- Configuração do Webhook para Render ---
+        PORT = int(os.environ.get("PORT", 8080))
+        RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-    if not RENDER_EXTERNAL_URL:
-        # Se a URL não estiver definida, rode em modo polling (para teste local)
-        logger.warning("RENDER_EXTERNAL_URL não encontrada. Iniciando em modo POLLING (para testes locais).")
-        await application.run_polling(poll_interval=1.0) # Adicionado poll_interval para estabilizar
-    else:
-        # Se a URL ESTIVER definida, rode em modo Webhook (para o Render)
-        webhook_path = f"/{TELEGRAM_TOKEN}"
-        webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
+        if not RENDER_EXTERNAL_URL:
+            # Polling (para teste local)
+            logger.warning("RENDER_EXTERNAL_URL não encontrada. Iniciando em modo POLLING (para testes locais).")
+            await application.run_polling(poll_interval=1.0) 
+        else:
+            # Webhook (para o Render)
+            webhook_path = f"/{TELEGRAM_TOKEN}"
+            webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
 
-        logger.info(f"Iniciando bot em modo Webhook. URL: {webhook_url}")
+            logger.info(f"Iniciando bot em modo Webhook. URL: {webhook_url}")
 
-        # Diz ao Telegram qual é a nossa URL
-        await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+            # Diz ao Telegram qual é a nossa URL
+            await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
 
-        # Inicia o servidor web interno do bot
-        await application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=webhook_path
-        )
+            # Inicia o servidor web interno do bot (ouve na porta)
+            await application.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=webhook_path
+            )
 
 if __name__ == "__main__":
     try:
