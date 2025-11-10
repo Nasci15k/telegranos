@@ -2,3 +2,5 @@ python-telegram-bot
 requests
 reportlab
 Pillow
+gunicorn 
+uvicorn
