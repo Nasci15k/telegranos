@@ -24,11 +24,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configurações e Tokens (Lendo de Variáveis de Ambiente) ---
-# O Render irá ler estes valores. Se não existirem, usará os valores padrão.
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
 FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "SEU_FETCHBRASIL_TOKEN_AQUI")
 BASE_URL_APIS_BRASIL = os.environ.get("BASE_URL_APIS_BRASIL", "https://apis-brasil.shop/apis/")
 BASE_URL_FETCHBRASIL = os.environ.get("BASE_URL_FETCHBRASIL", "https://api.fetchbrasil.com.br/")
+
+# Variável de ambiente do Render
+PORT = int(os.environ.get("PORT", 8000))
 
 # --- Funções Auxiliares (Formatação Minimalista e PDF) ---
 
@@ -370,14 +372,12 @@ async def set_webhook_on_render(application: Application, token: str) -> None:
     RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
     
     if not RENDER_EXTERNAL_URL:
-        # Isso só deve acontecer se for executado localmente sem a variável Render
         logger.warning("RENDER_EXTERNAL_URL não encontrada. O Webhook não será configurado.")
         return 
 
     webhook_path = f"/{token}"
     webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
 
-    # Adiciona getMe para garantir que o bot está vivo antes de configurar o webhook
     await application.bot.get_me() 
     logger.info(f"Configurando Webhook. URL: {webhook_url}")
     
@@ -417,14 +417,19 @@ def register_handlers(application: Application) -> None:
 
 # --- Instância Global da Aplicação (Entry Point do Gunicorn) ---
 
-# A instância `application` é criada globalmente para ser importada pelo Gunicorn/Uvicorn.
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+# 🚨 CORREÇÃO CRÍTICA: O método .webserver() é usado para garantir que o objeto 'webserver' seja criado
+# no objeto Application durante a inicialização, resolvendo o AttributeError.
+application = (
+    Application.builder()
+    .token(TELEGRAM_TOKEN)
+    .webserver(listen="0.0.0.0", port=PORT, url_path=f"/{TELEGRAM_TOKEN}")
+    .build()
+)
+
 register_handlers(application)
 
-# 🚨 CORREÇÃO CRÍTICA PARA GUNICORN/UVICORN NO RENDER
-# Criamos um atalho (webhook_app) que aponta para o servidor ASGI interno do python-telegram-bot.
-# Isso resolve o erro "Failed to parse 'application.webserver'" do Gunicorn.
-webhook_app = application.webserver # <--- ESSA LINHA É A CORREÇÃO
+# 🚨 ATALHO PARA GUNICORN: Aponta para o servidor ASGI interno do python-telegram-bot.
+webhook_app = application.webserver 
 
 # --- Execução Local (Polling) ---
 
