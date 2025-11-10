@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configurações e Tokens (Lendo de Variáveis de Ambiente) ---
-# ATENÇÃO: Substitua os valores de exemplo por suas chaves reais
+# ATENÇÃO: Defina estas variáveis no seu ambiente de hospedagem (ex: Render)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
 FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "SEU_FETCHBRASIL_TOKEN_AQUI")
 BASE_URL_APIS_BRASIL = os.environ.get("BASE_URL_APIS_BRASIL", "https://apis-brasil.shop/apis/")
@@ -131,7 +131,7 @@ def fetch_api(url, params=None):
     """Função genérica para requisitar qualquer URL de API e retornar o JSON."""
     logger.info(f"Requisitando API: {url} com params: {params}")
     try:
-        response = requests.get(url, params=params, timeout=40) # Timeout aumentado
+        response = requests.get(url, params=params, timeout=40)
         response.raise_for_status() 
         return response.json()
     except requests.exceptions.HTTPError as errh:
@@ -224,7 +224,6 @@ async def menu_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await update.message.reply_text(f"⚠️ Por favor, informe o {title}. Exemplo: `{command_name} <{title}>`", parse_mode='Markdown')
             return
 
-        # Salva a query na sessão do usuário (Importante para os callbacks)
         context.user_data['last_query'] = query
         context.user_data['last_query_title'] = title
         
@@ -348,7 +347,7 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     api_info = api_map.get(callback_data_api)
     query = context.user_data.get('last_query')
     query_title = context.user_data.get('last_query_title', "Consulta")
-    data = context.user_data.get(f'result_{callback_data_api}') # Pega o resultado salvo
+    data = context.user_data.get(f'result_{callback_data_api}')
     
     if not api_info or not query:
         await query_obj.message.reply_text("❌ Não foi possível gerar o PDF. Sessão expirada ou dados ausentes.")
@@ -357,16 +356,13 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     fetch_func, api_name = api_info
 
     if not data:
-        # Se os dados foram perdidos (sessão antiga), tenta buscar novamente
         await query_obj.edit_message_text(f"⏳ Dados não encontrados na sessão. Reconsultando {api_name}...", parse_mode='Markdown')
         data = await handle_api_call(query, fetch_func, query_title, api_name, update)
-        if not data: return # Falhou de novo
-        context.user_data[f'result_{callback_data_api}'] = data # Salva para o futuro
+        if not data: return
+        context.user_data[f'result_{callback_data_api}'] = data
 
-    # Edita a mensagem para mostrar o status
     await query_obj.edit_message_text(f"⏳ Gerando PDF para {api_name}...", parse_mode='Markdown')
     
-    # Gera e envia o PDF
     pdf_buffer = generate_pdf(f"Consulta {api_name} - {query}", data)
     await query_obj.message.reply_document(
         document=pdf_buffer.getvalue(),
@@ -374,7 +370,6 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         caption=f"✅ PDF gerado com sucesso para {query}"
     )
     
-    # Volta a mensagem original (incluindo o botão de PDF)
     markdown_output = format_json_to_markdown(data)
     keyboard = [[InlineKeyboardButton("📥 Gerar PDF", callback_data=f"pdf_{callback_data_api}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -423,7 +418,7 @@ async def main() -> None:
         logger.error("TELEGRAM_TOKEN não configurado. O bot não pode ser iniciado. Atualize a variável TELEGRAM_TOKEN.")
         return
 
-    # Usando 'async with' para garantir a inicialização e o shutdown limpo
+    # 🚨 CORREÇÃO ESSENCIAL PARA RENDER: Usando 'async with'
     async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
         
         register_handlers(application)
@@ -447,31 +442,19 @@ async def main() -> None:
             await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
 
             # Inicia o servidor web interno do bot (ouve na porta)
+            # Esta chamada bloqueia indefinidamente, mantendo o processo vivo no Render
             await application.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
                 url_path=webhook_path
             )
 
-# --- Bloco de Execução Principal (Correção do Event Loop) ---
+# --- Bloco de Execução Principal (Padrão para Assincronismo) ---
 if __name__ == "__main__":
     try:
-        # 1. Cria e define um novo loop de eventos, essencial para o Webhook no Render.
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # 2. Executa a coroutine principal (main) no loop até sua conclusão.
-        loop.run_until_complete(main())
-        
+        # Padrão correto para iniciar a coroutine 'main' com o 'async with' dentro dela
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot desligado pelo usuário.")
     except Exception as e:
         logger.error(f"Erro fatal no bot: {e}")
-    finally:
-        # 3. Garante que o loop seja fechado de forma limpa.
-        if 'loop' in locals() and loop.is_running():
-            # Executa o shutdown antes de fechar o loop
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.close()
-        elif 'loop' in locals() and not loop.is_running():
-            loop.close()
