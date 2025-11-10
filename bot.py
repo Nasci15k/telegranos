@@ -24,6 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configurações e Tokens (Lendo de Variáveis de Ambiente) ---
+# O Render irá ler estes valores. Se não existirem, usará os valores padrão.
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
 FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "SEU_FETCHBRASIL_TOKEN_AQUI")
 BASE_URL_APIS_BRASIL = os.environ.get("BASE_URL_APIS_BRASIL", "https://apis-brasil.shop/apis/")
@@ -151,7 +152,7 @@ def fetch_apis_brasil(endpoint, param_name, query):
 
 def fetch_fetchbrasil_api(endpoint, query):
     """Requisições para a base api.fetchbrasil.com.br."""
-    if not FETCHBRASIL_TOKEN:
+    if not FETCHBRASIL_TOKEN or FETCHBRASIL_TOKEN == "SEU_FETCHBRASIL_TOKEN_AQUI":
         return {"status": "ERROR", "message": "Token FETCHBRASIL_TOKEN não configurado."}
     
     url = f"{BASE_URL_FETCHBRASIL}{endpoint}.php"
@@ -175,7 +176,7 @@ api_map = {
     "api_fetchbrasil_placa": (lambda q: fetch_fetchbrasil_api("placa_basico", q), "FetchBrasil Placa"),
 }
 
-# --- Handlers de Comandos e Callbacks (Inclusas as funções) ---
+# --- Handlers de Comandos e Callbacks ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Envia uma mensagem de boas-vindas."""
@@ -369,13 +370,17 @@ async def set_webhook_on_render(application: Application, token: str) -> None:
     RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
     
     if not RENDER_EXTERNAL_URL:
-        # Modo Polling local. A URL do Webhook não será definida.
+        # Isso só deve acontecer se for executado localmente sem a variável Render
+        logger.warning("RENDER_EXTERNAL_URL não encontrada. O Webhook não será configurado.")
         return 
 
     webhook_path = f"/{token}"
     webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
 
+    # Adiciona getMe para garantir que o bot está vivo antes de configurar o webhook
+    await application.bot.get_me() 
     logger.info(f"Configurando Webhook. URL: {webhook_url}")
+    
     # Define a URL do Webhook no Telegram
     await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
     logger.info("Webhook configurado com sucesso.")
@@ -416,21 +421,21 @@ def register_handlers(application: Application) -> None:
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 register_handlers(application)
 
+# 🚨 CORREÇÃO CRÍTICA PARA GUNICORN/UVICORN NO RENDER
+# Criamos um atalho (webhook_app) que aponta para o servidor ASGI interno do python-telegram-bot.
+# Isso resolve o erro "Failed to parse 'application.webserver'" do Gunicorn.
+webhook_app = application.webserver # <--- ESSA LINHA É A CORREÇÃO
+
 # --- Execução Local (Polling) ---
 
 async def start_local_polling() -> None:
     """Inicia o bot em modo Polling para testes locais."""
-    # Garante que, se a variável RENDER_EXTERNAL_URL não existir (ambiente local), ele roda em Polling.
     if not os.environ.get("RENDER_EXTERNAL_URL"):
         logger.warning("RENDER_EXTERNAL_URL não encontrada. Iniciando em modo POLLING.")
-        # O stop_signals=None ajuda a evitar que o loop feche prematuramente.
         await application.run_polling(poll_interval=1.0, stop_signals=None)
 
 if __name__ == "__main__":
-    # Quando o script é executado localmente, ele tenta rodar em modo Polling.
-    # No Render, este bloco não será executado; o comando Gunicorn assumirá.
     try:
         asyncio.run(start_local_polling())
     except Exception as e:
-        # Se for um KeyboardInterrupt ou erro no Polling local
         logger.error(f"Erro na execução local: {e}")
