@@ -418,7 +418,7 @@ async def main() -> None:
         logger.error("TELEGRAM_TOKEN não configurado. O bot não pode ser iniciado. Atualize a variável TELEGRAM_TOKEN.")
         return
 
-    # 🚨 CORREÇÃO ESSENCIAL PARA RENDER: Usando 'async with'
+    # Usando 'async with' para garantir a inicialização e o shutdown limpo
     async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
         
         register_handlers(application)
@@ -442,19 +442,26 @@ async def main() -> None:
             await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
 
             # Inicia o servidor web interno do bot (ouve na porta)
-            # Esta chamada bloqueia indefinidamente, mantendo o processo vivo no Render
             await application.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
                 url_path=webhook_path
             )
 
-# --- Bloco de Execução Principal (Padrão para Assincronismo) ---
+            # 🚨 CORREÇÃO FINAL PARA RENDER: Mantém o Event Loop vivo.
+            # Essa linha impede que o processo do Python seja encerrado após a configuração do webhook,
+            # o que causava o erro "Application exited early".
+            logger.info("Aguardando requisições do Webhook...")
+            await asyncio.Future()
+
+
+# --- Bloco de Execução Principal (Padrão de Início) ---
 if __name__ == "__main__":
     try:
-        # Padrão correto para iniciar a coroutine 'main' com o 'async with' dentro dela
+        # Inicia a função main() no Event Loop, que será mantido vivo por asyncio.Future() no modo webhook.
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot desligado pelo usuário.")
     except Exception as e:
+        # Este erro só deve ocorrer se o Render fechar o processo de forma não convencional.
         logger.error(f"Erro fatal no bot: {e}")
