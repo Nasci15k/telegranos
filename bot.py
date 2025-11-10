@@ -1,6 +1,6 @@
 '''
 Bot de Consultas Profissional para Telegram
-Funcionalidades: Menus Inline, Consolidação SPC, Exportação para PDF, Variáveis de Ambiente, Modo Webhook para Render Gratuito.
+Funcionalidades: Menus Inline, Consolidação SPC, Exportação para PDF, Variáveis de Ambiente, Modo Webhook Estável com Gunicorn/Uvicorn.
 '''
 import logging
 import json
@@ -8,7 +8,7 @@ import requests
 import io
 import time
 import os
-import asyncio # Essencial para o modo Webhook e Render
+import asyncio 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from reportlab.lib.pagesizes import letter
@@ -24,16 +24,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configurações e Tokens (Lendo de Variáveis de Ambiente) ---
-# ATENÇÃO: Defina estas variáveis no seu ambiente de hospedagem (ex: Render)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
 FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "SEU_FETCHBRASIL_TOKEN_AQUI")
 BASE_URL_APIS_BRASIL = os.environ.get("BASE_URL_APIS_BRASIL", "https://apis-brasil.shop/apis/")
 BASE_URL_FETCHBRASIL = os.environ.get("BASE_URL_FETCHBRASIL", "https://api.fetchbrasil.com.br/")
 
-# --- Funções Auxiliares (Formatação Minimalista) ---
+# --- Funções Auxiliares (Formatação Minimalista e PDF) ---
 
 def format_json_to_markdown(data, indent=0):
-    """Formata um objeto JSON (dict ou list) em uma string Markdown minimalista e profissional."""
+    """Formata um objeto JSON em uma string Markdown minimalista."""
     if not isinstance(data, (dict, list)) or not data:
         return ""
 
@@ -125,7 +124,7 @@ def generate_pdf(title, data):
     buffer.seek(0)
     return buffer
 
-# --- Funções de Requisição de API ---
+# --- Funções de Requisição de API (Síncronas) ---
 
 def fetch_api(url, params=None):
     """Função genérica para requisitar qualquer URL de API e retornar o JSON."""
@@ -137,12 +136,6 @@ def fetch_api(url, params=None):
     except requests.exceptions.HTTPError as errh:
         logger.error(f"HTTP Error: {errh}")
         return {"status": "ERROR", "message": f"Erro HTTP: O servidor retornou o status {response.status_code}. A API pode estar fora do ar ou o token expirou."}
-    except requests.exceptions.ConnectionError as errc:
-        logger.error(f"Error Connecting: {errc}")
-        return {"status": "ERROR", "message": "Erro de Conexão: Não foi possível se conectar à API."}
-    except requests.exceptions.Timeout as errt:
-        logger.error(f"Timeout Error: {errt}")
-        return {"status": "ERROR", "message": "Erro de Tempo Limite: A API demorou muito para responder (40s)."}
     except requests.exceptions.RequestException as err:
         logger.error(f"API Request Error: {err}")
         return {"status": "ERROR", "message": f"Erro Desconhecido na Requisição: {err}"}
@@ -165,31 +158,24 @@ def fetch_fetchbrasil_api(endpoint, query):
     params = {"token": FETCHBRASIL_TOKEN, "chave": query}
     return fetch_api(url, params)
 
-# Mapeamento de API para funções de consulta
+# Mapeamento de API
 api_map = {
-    # Serasa/APIS BRASIL
     "api_serasacpf": (lambda q: fetch_apis_brasil("apiserasacpf2025.php", "cpf", q), "Serasa CPF"),
     "api_serasanome": (lambda q: fetch_apis_brasil("apiserasanome2025.php", "nome", q), "Serasa Nome"),
     "api_serasaemail": (lambda q: fetch_apis_brasil("apiserasaemail2025.php", "email", q), "Serasa Email"),
     "api_serpro_placa": (lambda q: fetch_apis_brasil("apiserpro.php", "placa", q), "Serpro Placa"),
-
-    # SPC/APIS BRASIL (Exemplo: SPC Consolidado)
     "api_spc": (lambda q: fetch_apis_brasil("apicpf27spc.php", "cpf", q), "SPC Consolidado"), 
-
-    # Outras APIS BRASIL
     "api_datasuscpf": (lambda q: fetch_apis_brasil("apicpfdatasus.php", "cpf", q), "Datasus CPF"),
     "api_credilinkcpf": (lambda q: fetch_apis_brasil("apicpfcredilink2025.php", "cpf", q), "Credilink CPF"),
     "api_bigdatacpf": (lambda q: fetch_apis_brasil("apicpfbigdata2025.php", "CPF", q), "BigData CPF"),
     "api_asseccpf": (lambda q: fetch_apis_brasil("apiassecc2025.php", "cpf", q), "Assec CPF"),
     "api_credilinktel": (lambda q: fetch_apis_brasil("apitelcredilink2025.php", "telefone", q), "Credilink Telefone"),
-    
-    # FetchBrasil
     "api_fetchbrasil_cpf": (lambda q: fetch_fetchbrasil_api("cpf_basico", q), "FetchBrasil CPF"),
     "api_fetchbrasil_nome": (lambda q: fetch_fetchbrasil_api("nome_basico", q), "FetchBrasil Nome"),
     "api_fetchbrasil_placa": (lambda q: fetch_fetchbrasil_api("placa_basico", q), "FetchBrasil Placa"),
 }
 
-# --- Handlers de Comandos ---
+# --- Handlers de Comandos e Callbacks (Inclusas as funções) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Envia uma mensagem de boas-vindas."""
@@ -242,6 +228,25 @@ async def menu_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.error(f"Erro no menu_query_handler: {e}")
         await update.message.reply_text("Ocorreu um erro ao preparar o menu. Tente novamente.")
 
+async def handle_api_call(query: str, fetch_func, title: str, api_name: str, update: Update) -> dict:
+    """Função para chamar a API e tratar erros de forma unificada."""
+    
+    # Usa asyncio.to_thread para executar a chamada síncrona (requests) em um thread separado
+    data = await asyncio.to_thread(fetch_func, query)
+    
+    if data.get("status") == "ERROR" or ('message' in data and 'Erro' in data['message']) or ('code' in data and data['code'] in [203, 404]):
+        error_message = data.get("message", "Detalhe de erro desconhecido.")
+        
+        if data.get("status") == "ERROR":
+            await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
+        elif data.get("code") in [203, 404]:
+            await update.effective_message.reply_text(f"⚠️ *Consulta - {api_name}*\n\nNenhum resultado encontrado para `{query}`.", parse_mode='Markdown')
+        else:
+            await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
+        return None
+
+    return data
+
 async def simple_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, fetch_func, title: str, api_name: str) -> None:
     """Handler genérico para comandos que não exigem menu inline."""
     try:
@@ -270,27 +275,6 @@ async def simple_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Erro no simple_query_handler para {api_name}: {e}")
         await update.message.reply_text("Ocorreu um erro ao processar sua consulta. Tente novamente.")
-
-# --- Handler de Callback (Botões Inline) ---
-
-async def handle_api_call(query: str, fetch_func, title: str, api_name: str, update: Update) -> dict:
-    """Função para chamar a API e tratar erros de forma unificada."""
-    
-    # Usa asyncio.to_thread para executar a chamada síncrona (requests) em um thread separado
-    data = await asyncio.to_thread(fetch_func, query)
-    
-    if data.get("status") == "ERROR" or ('message' in data and 'Erro' in data['message']) or ('code' in data and data['code'] in [203, 404]):
-        error_message = data.get("message", "Detalhe de erro desconhecido.")
-        
-        if data.get("status") == "ERROR":
-            await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
-        elif data.get("code") in [203, 404]:
-            await update.effective_message.reply_text(f"⚠️ *Consulta - {api_name}*\n\nNenhum resultado encontrado para `{query}`.", parse_mode='Markdown')
-        else:
-            await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
-        return None
-
-    return data
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Trata cliques nos botões inline de consulta."""
@@ -333,10 +317,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
     else:
-        # Se houve erro no handle_api_call, ele já enviou uma mensagem de erro
         await query_obj.edit_message_text(f"❌ Ocorreu um erro ao consultar {api_name}. Verifique o erro detalhado acima ou tente outra API.")
-
-# --- Handler de Geração de PDF ---
 
 async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Trata o clique no botão 'Gerar PDF'."""
@@ -356,6 +337,7 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     fetch_func, api_name = api_info
 
     if not data:
+        # Reconsultar se os dados expiraram da sessão
         await query_obj.edit_message_text(f"⏳ Dados não encontrados na sessão. Reconsultando {api_name}...", parse_mode='Markdown')
         data = await handle_api_call(query, fetch_func, query_title, api_name, update)
         if not data: return
@@ -380,7 +362,23 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode='Markdown'
     )
 
-# --- Registro de Handlers e Main (Modo Webhook/Polling) ---
+# --- Funções de Setup Webhook (Executadas uma vez) ---
+
+async def set_webhook_on_render(application: Application, token: str) -> None:
+    """Define o Webhook no Telegram usando as variáveis de ambiente do Render."""
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+    
+    if not RENDER_EXTERNAL_URL:
+        # Modo Polling local. A URL do Webhook não será definida.
+        return 
+
+    webhook_path = f"/{token}"
+    webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
+
+    logger.info(f"Configurando Webhook. URL: {webhook_url}")
+    # Define a URL do Webhook no Telegram
+    await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+    logger.info("Webhook configurado com sucesso.")
 
 def register_handlers(application: Application) -> None:
     """Registra todos os handlers no bot."""
@@ -412,56 +410,27 @@ def register_handlers(application: Application) -> None:
 
     logger.info("Handlers registrados com sucesso.")
 
-async def main() -> None:
-    """Inicia o bot (Modo Webhook para Render Gratuito ou Polling Local)."""
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "SEU_TELEGRAM_TOKEN_AQUI":
-        logger.error("TELEGRAM_TOKEN não configurado. O bot não pode ser iniciado. Atualize a variável TELEGRAM_TOKEN.")
-        return
+# --- Instância Global da Aplicação (Entry Point do Gunicorn) ---
 
-    # Usando 'async with' para garantir a inicialização e o shutdown limpo
-    async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
-        
-        register_handlers(application)
+# A instância `application` é criada globalmente para ser importada pelo Gunicorn/Uvicorn.
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+register_handlers(application)
 
-        # --- Configuração do Webhook para Render ---
-        PORT = int(os.environ.get("PORT", 8080))
-        RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+# --- Execução Local (Polling) ---
 
-        if not RENDER_EXTERNAL_URL:
-            # Polling (para teste local)
-            logger.warning("RENDER_EXTERNAL_URL não encontrada. Iniciando em modo POLLING (para testes locais).")
-            await application.run_polling(poll_interval=1.0) 
-        else:
-            # Webhook (para o Render)
-            webhook_path = f"/{TELEGRAM_TOKEN}"
-            webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
+async def start_local_polling() -> None:
+    """Inicia o bot em modo Polling para testes locais."""
+    # Garante que, se a variável RENDER_EXTERNAL_URL não existir (ambiente local), ele roda em Polling.
+    if not os.environ.get("RENDER_EXTERNAL_URL"):
+        logger.warning("RENDER_EXTERNAL_URL não encontrada. Iniciando em modo POLLING.")
+        # O stop_signals=None ajuda a evitar que o loop feche prematuramente.
+        await application.run_polling(poll_interval=1.0, stop_signals=None)
 
-            logger.info(f"Iniciando bot em modo Webhook. URL: {webhook_url}")
-
-            # Diz ao Telegram qual é a nossa URL
-            await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
-
-            # Inicia o servidor web interno do bot (ouve na porta)
-            await application.run_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                url_path=webhook_path
-            )
-
-            # 🚨 CORREÇÃO FINAL PARA RENDER: Mantém o Event Loop vivo.
-            # Essa linha impede que o processo do Python seja encerrado após a configuração do webhook,
-            # o que causava o erro "Application exited early".
-            logger.info("Aguardando requisições do Webhook...")
-            await asyncio.Future()
-
-
-# --- Bloco de Execução Principal (Padrão de Início) ---
 if __name__ == "__main__":
+    # Quando o script é executado localmente, ele tenta rodar em modo Polling.
+    # No Render, este bloco não será executado; o comando Gunicorn assumirá.
     try:
-        # Inicia a função main() no Event Loop, que será mantido vivo por asyncio.Future() no modo webhook.
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot desligado pelo usuário.")
+        asyncio.run(start_local_polling())
     except Exception as e:
-        # Este erro só deve ocorrer se o Render fechar o processo de forma não convencional.
-        logger.error(f"Erro fatal no bot: {e}")
+        # Se for um KeyboardInterrupt ou erro no Polling local
+        logger.error(f"Erro na execução local: {e}")
