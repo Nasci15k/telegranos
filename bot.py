@@ -277,16 +277,14 @@ async def simple_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_api_call(query: str, fetch_func, title: str, api_name: str, update: Update) -> dict:
     """Função para chamar a API e tratar erros de forma unificada."""
     
-    # As chamadas de requests.get são síncronas e bloqueantes
-    # Em um ambiente asyncio, é melhor usar asyncio.to_thread para não bloquear o event loop
+    # Usa asyncio.to_thread para executar a chamada síncrona (requests) em um thread separado
     data = await asyncio.to_thread(fetch_func, query)
     
     if data.get("status") == "ERROR" or ('message' in data and 'Erro' in data['message']) or ('code' in data and data['code'] in [203, 404]):
         error_message = data.get("message", "Detalhe de erro desconhecido.")
-        # Se for um erro HTTP, use a mensagem de erro da requisição
+        
         if data.get("status") == "ERROR":
             await update.effective_message.reply_text(f"❌ *Erro na Consulta - {api_name}*\n\nDetalhes: `{error_message}`", parse_mode='Markdown')
-        # Se for "Nenhum resultado", use uma mensagem mais amigável
         elif data.get("code") in [203, 404]:
             await update.effective_message.reply_text(f"⚠️ *Consulta - {api_name}*\n\nNenhum resultado encontrado para `{query}`.", parse_mode='Markdown')
         else:
@@ -337,7 +335,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     else:
         # Se houve erro no handle_api_call, ele já enviou uma mensagem de erro
-        # Apenas atualiza a mensagem original para evitar o "loading" infinito
         await query_obj.edit_message_text(f"❌ Ocorreu um erro ao consultar {api_name}. Verifique o erro detalhado acima ou tente outra API.")
 
 # --- Handler de Geração de PDF ---
@@ -351,20 +348,21 @@ async def pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     api_info = api_map.get(callback_data_api)
     query = context.user_data.get('last_query')
     query_title = context.user_data.get('last_query_title', "Consulta")
-    data = context.user_data.get(f'result_{callback_data_api}')
-
-    if not api_info or not query or not data:
-        await query_obj.message.reply_text("❌ Não foi possível gerar o PDF. A sessão expirou ou os dados da consulta foram perdidos.")
-        # Se os dados foram perdidos, tenta buscar novamente
-        if api_info and query:
-            await query_obj.message.reply_text("Tentando buscar os dados novamente para gerar o PDF...")
-            fetch_func, api_name = api_info
-            data = await handle_api_call(query, fetch_func, query_title, api_name, update)
-            if not data: return # Falhou de novo
-            context.user_data[f'result_{callback_data_api}'] = data # Salva para o futuro
+    data = context.user_data.get(f'result_{callback_data_api}') # Pega o resultado salvo
+    
+    if not api_info or not query:
+        await query_obj.message.reply_text("❌ Não foi possível gerar o PDF. Sessão expirada ou dados ausentes.")
+        return
 
     fetch_func, api_name = api_info
-    
+
+    if not data:
+        # Se os dados foram perdidos (sessão antiga), tenta buscar novamente
+        await query_obj.edit_message_text(f"⏳ Dados não encontrados na sessão. Reconsultando {api_name}...", parse_mode='Markdown')
+        data = await handle_api_call(query, fetch_func, query_title, api_name, update)
+        if not data: return # Falhou de novo
+        context.user_data[f'result_{callback_data_api}'] = data # Salva para o futuro
+
     # Edita a mensagem para mostrar o status
     await query_obj.edit_message_text(f"⏳ Gerando PDF para {api_name}...", parse_mode='Markdown')
     
@@ -425,7 +423,7 @@ async def main() -> None:
         logger.error("TELEGRAM_TOKEN não configurado. O bot não pode ser iniciado. Atualize a variável TELEGRAM_TOKEN.")
         return
 
-    # 🚨 CORREÇÃO ESSENCIAL PARA RENDER: Usando 'async with'
+    # Usando 'async with' para garantir a inicialização e o shutdown limpo
     async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
         
         register_handlers(application)
@@ -455,10 +453,25 @@ async def main() -> None:
                 url_path=webhook_path
             )
 
+# --- Bloco de Execução Principal (Correção do Event Loop) ---
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        # 1. Cria e define um novo loop de eventos, essencial para o Webhook no Render.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # 2. Executa a coroutine principal (main) no loop até sua conclusão.
+        loop.run_until_complete(main())
+        
     except KeyboardInterrupt:
         logger.info("Bot desligado pelo usuário.")
     except Exception as e:
         logger.error(f"Erro fatal no bot: {e}")
+    finally:
+        # 3. Garante que o loop seja fechado de forma limpa.
+        if 'loop' in locals() and loop.is_running():
+            # Executa o shutdown antes de fechar o loop
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+        elif 'loop' in locals() and not loop.is_running():
+            loop.close()
