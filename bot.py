@@ -11,6 +11,8 @@ import os
 import asyncio 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+# 🚨 IMPORTAÇÃO NECESSÁRIA PARA CONFIGURAÇÃO MANUAL DO WEBHOOK/ASGI
+from telegram.ext._webserver import WebhookServer 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
@@ -417,19 +419,21 @@ def register_handlers(application: Application) -> None:
 
 # --- Instância Global da Aplicação (Entry Point do Gunicorn) ---
 
-# 🚨 CORREÇÃO CRÍTICA: O método .webserver() é usado para garantir que o objeto 'webserver' seja criado
-# no objeto Application durante a inicialização, resolvendo o AttributeError.
-application = (
-    Application.builder()
-    .token(TELEGRAM_TOKEN)
-    .webserver(listen="0.0.0.0", port=PORT, url_path=f"/{TELEGRAM_TOKEN}")
-    .build()
-)
-
+# 1. Instanciar a Application no modo básico.
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 register_handlers(application)
 
-# 🚨 ATALHO PARA GUNICORN: Aponta para o servidor ASGI interno do python-telegram-bot.
-webhook_app = application.webserver 
+# 🚨 CORREÇÃO CRÍTICA: Criação manual do WebhookServer.
+# Este método contorna o erro 'AttributeError: ... no attribute webserver' no builder.
+webhook_server = WebhookServer(
+    listen="0.0.0.0",
+    port=PORT,
+    url_path=f"/{TELEGRAM_TOKEN}",
+    application=application
+)
+
+# 2. Expor o objeto ASGI para o Gunicorn
+webhook_app = webhook_server.app 
 
 # --- Execução Local (Polling) ---
 
