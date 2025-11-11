@@ -1,8 +1,8 @@
-'''
-Bot de Consultas Profissional para Telegram
+"""
+Bot de Consultas Profissional (Telegram)
 Compatível com Render (FastAPI + Gunicorn + Uvicorn + Webhook)
-Versão: Estável 2025
-'''
+Versão: 11/11/2025 — Estável
+"""
 
 import logging
 import json
@@ -14,82 +14,70 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.lib import colors
 
-# --- LOGGING ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# ===== LOGGING =====
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURAÇÕES DE AMBIENTE ---
+# ===== CONFIGURAÇÕES =====
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
 FETCHBRASIL_TOKEN = os.environ.get("FETCHBRASIL_TOKEN", "SEU_FETCHBRASIL_TOKEN_AQUI")
 BASE_URL_APIS_BRASIL = os.environ.get("BASE_URL_APIS_BRASIL", "https://apis-brasil.shop/apis/")
 BASE_URL_FETCHBRASIL = os.environ.get("BASE_URL_FETCHBRASIL", "https://api.fetchbrasil.com.br/")
 PORT = int(os.environ.get("PORT", 8000))
 
-# --- FUNÇÕES AUXILIARES ---
-
+# ===== FUNÇÕES AUXILIARES =====
 def format_json_to_markdown(data, indent=0):
-    """Formata JSON em Markdown legível."""
     if not isinstance(data, (dict, list)) or not data:
         return ""
-    markdown_text = ""
-    indent_str = "  " * indent
+    markdown = ""
+    space = "  " * indent
     if isinstance(data, dict):
-        for key, value in data.items():
-            key_title = key.replace('_', ' ').title()
-            if isinstance(value, (dict, list)):
-                markdown_text += f"{indent_str}*{key_title}*:\n{format_json_to_markdown(value, indent + 1)}"
-            elif value not in [None, "", "null"]:
-                markdown_text += f"{indent_str}*{key_title}*: `{value}`\n"
+        for k, v in data.items():
+            title = k.replace("_", " ").title()
+            if isinstance(v, (dict, list)):
+                markdown += f"{space}*{title}*:\n{format_json_to_markdown(v, indent + 1)}"
+            elif v not in [None, "", "null"]:
+                markdown += f"{space}*{title}*: `{v}`\n"
     elif isinstance(data, list):
-        for item in data:
-            markdown_text += format_json_to_markdown(item, indent)
-    return markdown_text
+        for i in data:
+            markdown += format_json_to_markdown(i, indent)
+    return markdown
 
-
-def format_json_to_pdf(data, styles, elements, doc):
-    """Formata JSON para PDF (ReportLab)."""
+def format_json_to_pdf(data, styles, elements):
     if isinstance(data, dict):
-        for key, value in data.items():
-            key_title = key.replace('_', ' ').title()
-            if isinstance(value, (dict, list)):
-                elements.append(Paragraph(f"<b>{key_title}:</b>", styles['Normal']))
-                format_json_to_pdf(value, styles, elements, doc)
-            elif value not in [None, "", "null"]:
-                elements.append(Paragraph(f"<b>{key_title}:</b> {value}", styles['Normal']))
+        for k, v in data.items():
+            title = k.replace("_", " ").title()
+            if isinstance(v, (dict, list)):
+                elements.append(Paragraph(f"<b>{title}:</b>", styles["Normal"]))
+                format_json_to_pdf(v, styles, elements)
+            elif v not in [None, "", "null"]:
+                elements.append(Paragraph(f"<b>{title}:</b> {v}", styles["Normal"]))
     elif isinstance(data, list):
         for i, item in enumerate(data):
-            elements.append(Paragraph(f"Item {i+1}:", styles['Normal']))
-            format_json_to_pdf(item, styles, elements, doc)
-
+            elements.append(Paragraph(f"Item {i+1}:", styles["Normal"]))
+            format_json_to_pdf(item, styles, elements)
 
 def generate_pdf(title, data):
-    """Gera um PDF formatado com ReportLab."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     elements = [
-        Paragraph(f"<b>Relatório de Consulta: {title}</b>", styles['h1']),
+        Paragraph(f"<b>Relatório de Consulta: {title}</b>", styles["h1"]),
         Spacer(1, 0.3 * inch),
-        Paragraph(f"Data: {time.strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']),
-        Spacer(1, 0.2 * inch)
+        Paragraph(f"Data: {time.strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"]),
+        Spacer(1, 0.2 * inch),
     ]
-    format_json_to_pdf(data, styles, elements, doc)
+    format_json_to_pdf(data, styles, elements)
     doc.build(elements)
     buffer.seek(0)
     return buffer
 
-# --- FUNÇÕES DE REQUISIÇÃO ---
-
+# ===== FUNÇÕES DE API =====
 def fetch_api(url, params=None):
-    """Função genérica de requisição HTTP."""
     try:
         response = requests.get(url, params=params, timeout=40)
         response.raise_for_status()
@@ -105,33 +93,25 @@ def fetch_fetchbrasil_api(endpoint, query):
         return {"status": "ERROR", "message": "Token FETCHBRASIL_TOKEN não configurado."}
     return fetch_api(f"{BASE_URL_FETCHBRASIL}{endpoint}.php", {"token": FETCHBRASIL_TOKEN, "chave": query})
 
-# --- MAPA DE APIS ---
-
+# ===== MAPEAMENTO =====
 api_map = {
     "api_serasacpf": (lambda q: fetch_apis_brasil("apiserasacpf2025.php", "cpf", q), "Serasa CPF"),
     "api_serasanome": (lambda q: fetch_apis_brasil("apiserasanome2025.php", "nome", q), "Serasa Nome"),
-    "api_serasaemail": (lambda q: fetch_apis_brasil("apiserasaemail2025.php", "email", q), "Serasa Email"),
-    "api_serpro_placa": (lambda q: fetch_apis_brasil("apiserpro.php", "placa", q), "Serpro Placa"),
-    "api_spc": (lambda q: fetch_apis_brasil("apicpf27spc.php", "cpf", q), "SPC Consolidado"),
-    "api_datasuscpf": (lambda q: fetch_apis_brasil("apicpfdatasus.php", "cpf", q), "Datasus CPF"),
-    "api_credilinkcpf": (lambda q: fetch_apis_brasil("apicpfcredilink2025.php", "cpf", q), "Credilink CPF"),
-    "api_bigdatacpf": (lambda q: fetch_apis_brasil("apicpfbigdata2025.php", "CPF", q), "BigData CPF"),
-    "api_asseccpf": (lambda q: fetch_apis_brasil("apiassecc2025.php", "cpf", q), "Assec CPF"),
-    "api_credilinktel": (lambda q: fetch_apis_brasil("apitelcredilink2025.php", "telefone", q), "Credilink Telefone"),
     "api_fetchbrasil_cpf": (lambda q: fetch_fetchbrasil_api("cpf_basico", q), "FetchBrasil CPF"),
     "api_fetchbrasil_nome": (lambda q: fetch_fetchbrasil_api("nome_basico", q), "FetchBrasil Nome"),
     "api_fetchbrasil_placa": (lambda q: fetch_fetchbrasil_api("placa_basico", q), "FetchBrasil Placa"),
 }
 
-# --- HANDLERS ---
-
+# ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🤖 *Bot de Consultas Profissional*\n\n"
-        "Use os comandos abaixo:\n"
-        "/cpf `<número>`\n/nome_completo `<nome>`\n/placa `<placa>`\n/email `<email>`\n/telefone `<telefone>`"
+        "🤖 *Bot de Consultas*\n\n"
+        "Comandos disponíveis:\n"
+        "/cpf `<número>`\n"
+        "/nome_completo `<nome>`\n"
+        "/placa `<placa>`"
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 def extract_query(text):
     parts = text.split(maxsplit=1)
@@ -142,139 +122,84 @@ async def menu_query_handler(update: Update, context, title, buttons):
     if not query:
         await update.message.reply_text(f"⚠️ Informe o {title}. Exemplo: /cpf 12345678901")
         return
-    context.user_data['last_query'] = query
+    context.user_data["last_query"] = query
     keyboard = [[InlineKeyboardButton(text, callback_data=data)] for text, data in buttons]
     await update.message.reply_text(
         f"Selecione a API para consultar o {title} `{query}`:",
-        parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-async def handle_api_call(query, fetch_func, title, api_name, update):
+async def handle_api_call(query, fetch_func, api_name, update):
     data = await asyncio.to_thread(fetch_func, query)
     if data.get("status") == "ERROR":
-        await update.effective_message.reply_text(f"❌ Erro na consulta {api_name}:\n`{data['message']}`", parse_mode='Markdown')
+        await update.effective_message.reply_text(f"❌ Erro na consulta {api_name}:\n`{data['message']}`", parse_mode="Markdown")
         return None
     return data
-
-async def simple_query_handler(update, context, fetch_func, title, api_name):
-    query = extract_query(update.message.text)
-    if not query:
-        await update.message.reply_text(f"⚠️ Informe o {title}. Exemplo: /{title.lower()} valor")
-        return
-    await update.message.reply_text(f"⏳ Consultando {api_name}...")
-    data = await handle_api_call(query, fetch_func, title, api_name, update)
-    if data:
-        markdown_output = format_json_to_markdown(data)
-        pdf_buffer = generate_pdf(f"{title} - {query} ({api_name})", data)
-        await update.message.reply_document(
-            document=pdf_buffer.getvalue(),
-            filename=f"{title}_{query}_{api_name}.pdf",
-            caption=f"✅ *Resultado da Consulta - {api_name}*\n\n{markdown_output}",
-            parse_mode='Markdown'
-        )
 
 async def button_callback(update, context):
     q = update.callback_query
     await q.answer()
     data_id = q.data
     api_info = api_map.get(data_id)
-    query = context.user_data.get('last_query')
+    query = context.user_data.get("last_query")
     if not api_info or not query:
         await q.edit_message_text("Sessão expirada. Use o comando novamente.")
         return
     fetch_func, api_name = api_info
     await q.edit_message_text(f"⏳ Consultando {api_name}...")
-    data = await handle_api_call(query, fetch_func, "Consulta", api_name, update)
+    data = await handle_api_call(query, fetch_func, api_name, update)
     if data:
         markdown_output = format_json_to_markdown(data)
-        keyboard = [[InlineKeyboardButton("📥 Gerar PDF", callback_data=f"pdf_{data_id}")]]
-        context.user_data[f"result_{data_id}"] = data
-        await q.edit_message_text(
-            f"✅ *Resultado da Consulta - {api_name}*\n\n{markdown_output}",
-            parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await q.edit_message_text(f"✅ *Resultado {api_name}*\n\n{markdown_output}", parse_mode="Markdown")
 
-async def pdf_callback(update, context):
-    q = update.callback_query
-    await q.answer("Gerando PDF...")
-    data_id = q.data.replace("pdf_", "")
-    api_info = api_map.get(data_id)
-    query = context.user_data.get('last_query')
-    data = context.user_data.get(f"result_{data_id}")
-    if not api_info or not data:
-        await q.message.reply_text("Erro: dados não encontrados.")
-        return
-    fetch_func, api_name = api_info
-    pdf_buffer = generate_pdf(f"Consulta {api_name} - {query}", data)
-    await q.message.reply_document(pdf_buffer.getvalue(), filename=f"{api_name}_{query}.pdf",
-                                   caption=f"✅ PDF gerado com sucesso para {query}")
-
-# --- REGISTRO DE HANDLERS ---
-
+# ===== REGISTRO =====
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
-    app.add_handler(CommandHandler("cpf", lambda u, c: menu_query_handler(u, c, "CPF",
-        [("Serasa", "api_serasacpf"), ("Datasus", "api_datasuscpf"), ("Credilink", "api_credilinkcpf"),
-         ("BigData", "api_bigdatacpf"), ("Assec", "api_asseccpf"), ("FetchBrasil", "api_fetchbrasil_cpf"),
-         ("SPC Consolidado", "api_spc")])))
-    app.add_handler(CommandHandler("nome_completo", lambda u, c: menu_query_handler(u, c, "Nome",
-        [("Serasa", "api_serasanome"), ("FetchBrasil", "api_fetchbrasil_nome")])))
-    app.add_handler(CommandHandler("placa", lambda u, c: menu_query_handler(u, c, "Placa",
-        [("FetchBrasil", "api_fetchbrasil_placa"), ("Serpro", "api_serpro_placa")])))
-    app.add_handler(CommandHandler("email", lambda u, c: menu_query_handler(u, c, "Email",
-        [("Serasa", "api_serasaemail")])))
-    app.add_handler(CommandHandler("telefone", lambda u, c: menu_query_handler(u, c, "Telefone",
-        [("Credilink", "api_credilinktel")])))
-    app.add_handler(CallbackQueryHandler(pdf_callback, pattern="^pdf_"))
+    app.add_handler(CommandHandler("cpf", lambda u, c: menu_query_handler(u, c, "CPF", [("Serasa", "api_serasacpf"), ("FetchBrasil", "api_fetchbrasil_cpf")])))
+    app.add_handler(CommandHandler("nome_completo", lambda u, c: menu_query_handler(u, c, "Nome", [("Serasa", "api_serasanome"), ("FetchBrasil", "api_fetchbrasil_nome")])))
+    app.add_handler(CommandHandler("placa", lambda u, c: menu_query_handler(u, c, "Placa", [("FetchBrasil", "api_fetchbrasil_placa")])))
     app.add_handler(CallbackQueryHandler(button_callback))
     logger.info("Handlers registrados com sucesso.")
 
-# --- APLICAÇÃO TELEGRAM ---
+# ===== APLICAÇÃO =====
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 register_handlers(application)
 
-# --- FASTAPI (WEBHOOK RENDER) ---
+# ===== FASTAPI PARA WEBHOOK =====
 from fastapi import FastAPI, Request
-import uvicorn
-
 webhook_app = FastAPI()
 
 @webhook_app.on_event("startup")
 async def on_startup():
-    """Inicia o processamento do bot automaticamente no Render."""
-    logger.info("🚀 Iniciando processamento do bot (queue runner)...")
+    logger.info("🚀 Iniciando bot no Render...")
     await application.initialize()
     await application.start()
-    application.create_task(application.process_update_queue())
+    logger.info("✅ Bot pronto para receber atualizações.")
 
 @webhook_app.post(f"/{TELEGRAM_TOKEN}")
 async def telegram_webhook(request: Request):
-    """Recebe atualizações do Telegram e as envia para a fila."""
     data = await request.json()
     update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
+    await application.process_update(update)
     return {"status": "ok"}
 
-async def set_webhook_on_render(application: Application, token: str) -> None:
-    """Configura o Webhook automaticamente no Render."""
+async def set_webhook_on_render(application: Application, token: str):
     RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
     if not RENDER_EXTERNAL_URL:
-        logger.warning("RENDER_EXTERNAL_URL não encontrada. Webhook não configurado.")
+        logger.warning("RENDER_EXTERNAL_URL não configurada.")
         return
     webhook_url = f"{RENDER_EXTERNAL_URL}/{token}"
     await application.bot.delete_webhook()
     await application.bot.set_webhook(url=webhook_url)
     logger.info(f"Webhook configurado com sucesso: {webhook_url}")
 
-# --- EXECUÇÃO LOCAL (POLLING) ---
+# ===== EXECUÇÃO LOCAL =====
 async def start_local_polling():
     if not os.environ.get("RENDER_EXTERNAL_URL"):
-        logger.warning("Executando localmente (modo polling).")
+        logger.warning("Executando localmente (polling).")
         await application.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(start_local_polling())
-    except Exception as e:
-        logger.error(f"Erro na execução local: {e}")
+    asyncio.run(start_local_polling())
