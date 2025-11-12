@@ -39,9 +39,7 @@ def normalize_chat_id(raw: str) -> int:
         r = raw.strip()
         if r.startswith("-100"):
             return int(r)
-        # if comes like 1003027034402 -> turn into -100... if missing prefix
         if r.isdigit() and len(r) >= 10:
-            # if already has 13+ digits assume proper group id; prefix -100 if missing
             return int(f"-100{r[-10:]}")
         return int(r)
     except Exception:
@@ -88,7 +86,7 @@ API_ENDPOINTS: Dict[str, str] = {
 
 # ---------------- State ----------------
 API_STATUS: Dict[str, Dict[str, Any]] = {}
-LAST_EPHEMERAL: Dict[int, int] = {}  # chat_id -> message_id (ephemeral messages only)
+LAST_EPHEMERAL: Dict[int, int] = {}
 HTTP_CLIENT = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
 
 FIELDS_TO_REMOVE = {"status", "message", "mensagem", "source", "token", "timestamp", "limit", "success", "code", "error"}
@@ -112,7 +110,6 @@ async def fetch_with_retries(url: str, retries: int = HTTP_RETRIES) -> Any:
     for attempt in range(retries + 1):
         try:
             r = await HTTP_CLIENT.get(url, timeout=HTTP_TIMEOUT)
-            # Consider any 200 response as success for health check
             if r.status_code == 200:
                 try:
                     return r.json()
@@ -128,7 +125,6 @@ async def fetch_with_retries(url: str, retries: int = HTTP_RETRIES) -> Any:
     return {"status": "ERROR", "message": f"Falha ao acessar API ({url}): {last_exc}"}
 
 def remove_phrases(text: str) -> str:
-    """Remove frases indesejadas como 'sou o dono', 'consultado por', etc."""
     if not isinstance(text, str):
         return text
     for phrase in PHRASES_TO_REMOVE:
@@ -142,10 +138,8 @@ def clean_api_data(data: Any) -> Any:
             if not k: continue
             if k.lower() in FIELDS_TO_REMOVE: continue
             
-            # Clean the value
             cleaned = clean_api_data(v)
             
-            # Skip empty values
             if cleaned is None: continue
             if cleaned == "": continue
             if cleaned == "null": continue
@@ -153,7 +147,6 @@ def clean_api_data(data: Any) -> Any:
             if cleaned == []: continue
             if cleaned == {}: continue
             
-            # Remove phrases from string values
             if isinstance(cleaned, str):
                 cleaned = remove_phrases(cleaned)
                 if not cleaned: continue
@@ -172,12 +165,10 @@ def clean_api_data(data: Any) -> Any:
             if cleaned == []: continue
             if cleaned == {}: continue
             
-            # Remove phrases from string values
             if isinstance(cleaned, str):
                 cleaned = remove_phrases(cleaned)
                 if not cleaned: continue
             
-            # Avoid duplicates
             if cleaned not in cleaned_list:
                 cleaned_list.append(cleaned)
         return cleaned_list if cleaned_list else None
@@ -200,7 +191,6 @@ def format_txt(data: Any, indent: int = 0) -> str:
                 lines.append(format_txt(v, indent + 4))
             else:
                 lines.append(f"{pref}{key}: {v}")
-        # Add blank line between major sections
         if indent == 0:
             lines.append("")
             
@@ -226,7 +216,6 @@ def format_html(data: Any, indent: int = 0) -> str:
                 lines.append(format_html(v, indent + 1))
             else:
                 lines.append(f"<b>{key}:</b> {v}")
-        # Add blank line between major sections
         if indent == 0:
             lines.append("")
             
@@ -265,7 +254,6 @@ async def check_api_health():
         try:
             r = await HTTP_CLIENT.get(url, timeout=HTTP_TIMEOUT)
             rt = time.time() - start
-            # Consider any 200 response as success
             if r.status_code == 200:
                 API_STATUS[key] = {"icon": classify_rt(rt), "rt": rt}
             else:
@@ -326,12 +314,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_key = q.data
     user = update.effective_user
     
-    # Handle menu navigation
     if api_key.startswith("menu_"):
         await handle_menu_navigation(update, context, api_key)
         return
         
-    # Handle CPF_FULL from quick menu
     if api_key == "cpf_full":
         await handle_cpf_full_from_menu(update, context)
         return
@@ -341,13 +327,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Sessão expirada. Envie o comando novamente.")
         return
 
-    # Clean value (remove $ or other artifacts)
     query_value = str(query_value).replace("$", "").strip()
-
-    # delete previous ephemeral
     await delete_ephemeral(context.application, update.effective_chat.id)
 
-    # send ephemeral status and track
     ep = await context.application.bot.send_message(
         chat_id=update.effective_chat.id, 
         text=f"🔍 Consultando <code>{query_value}</code> — fonte: {api_key}", 
@@ -367,7 +349,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     start = time.time()
-    # route to endpoint
     if api_key not in API_ENDPOINTS:
         await context.application.bot.edit_message_text(
             chat_id=ep.chat_id, 
@@ -380,7 +361,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await fetch_with_retries(url)
     elapsed = time.time() - start
 
-    # handle error
     if isinstance(result, dict) and result.get("status") == "ERROR":
         await context.application.bot.edit_message_text(
             chat_id=ep.chat_id, 
@@ -391,22 +371,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     cleaned = clean_api_data(result)
-    textified_html = format_html(cleaned)  # ✅ AGORA SEMPRE USA HTML
-    textified_txt = format_txt(cleaned)    # ✅ SÓ PARA ARQUIVOS .TXT
+    textified_html = format_html(cleaned)
+    textified_txt = format_txt(cleaned)
     username_for_file = user.username or user.first_name or "usuario"
     summary = f"✅ Consulta concluída — tempo: {elapsed:.2f}s"
 
-    # ✅ CORREÇÃO: Agora textified_html SEMPRE é usado para mensagens de texto
-    # ✅ textified_txt só é usado para gerar arquivos .txt
     if textified_html and len(textified_html) <= 3500 and textified_html.strip():
         final_text = f"{summary}\n\n{textified_html}\n\n🤖 {BOT_DISPLAY_NAME}\n👤 @{username_for_file}"
-        # replace ephemeral content with final
         try:
             await context.application.bot.edit_message_text(
                 chat_id=ep.chat_id, 
                 message_id=ep.message_id, 
                 text=final_text, 
-                parse_mode="HTML"  # ✅ IMPORTANTE: parse_mode HTML para aplicar a formatação
+                parse_mode="HTML"
             )
             track_ephemeral(ep.chat_id, ep.message_id)
             await send_log(context.application, f"[OK] {username_for_file} {api_key} {query_value} ({elapsed:.2f}s)")
@@ -414,12 +391,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m = await context.application.bot.send_message(
                 chat_id=ep.chat_id, 
                 text=final_text, 
-                parse_mode="HTML"  # ✅ IMPORTANTE: parse_mode HTML aqui também
+                parse_mode="HTML"
             )
             track_ephemeral(m.chat_id, m.message_id)
             await send_log(context.application, f"[OK send] {username_for_file} {api_key} {query_value} ({elapsed:.2f}s)")
     else:
-        # send file: delete ephemeral first, then send file
         try:
             await context.application.bot.edit_message_text(
                 chat_id=ep.chat_id, 
@@ -429,12 +405,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         
-        # ✅ Para arquivos .txt, continua usando format_txt
         txt_bytes = generate_txt_bytes(f"{api_key}_{query_value}", cleaned, username_for_file)
         bio = io.BytesIO(txt_bytes)
         bio.name = f"{api_key}_{query_value}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.txt"
         
-        # delete ephemeral BEFORE sending final file
         await delete_ephemeral(context.application, ep.chat_id)
         
         try:
@@ -453,7 +427,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 async def handle_menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE, menu_key: str):
-    """Handle menu navigation callbacks from the main /start menu"""
     q = update.callback_query
     
     if menu_key == "menu_cpf":
@@ -514,7 +487,6 @@ async def handle_menu_navigation(update: Update, context: ContextTypes.DEFAULT_T
         await show_main_menu(update, context)
 
 async def handle_cpf_full_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle CPF_FULL from the quick detection menu"""
     q = update.callback_query
     query_value = context.user_data.get("last_query")
     
@@ -522,12 +494,10 @@ async def handle_cpf_full_from_menu(update: Update, context: ContextTypes.DEFAUL
         await q.edit_message_text("Sessão expirada. Envie o CPF novamente.")
         return
         
-    # Proceed with CPF_FULL
     context.user_data["last_query"] = query_value
     await cmd_cpf_full_internal(update, context, query_value)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the main menu (same as /start)"""
     keyboard = [
         [InlineKeyboardButton("🔍 CPF", callback_data="menu_cpf")],
         [InlineKeyboardButton("📂 CPF FULL", callback_data="menu_cpf_full")],
@@ -626,7 +596,6 @@ async def cmd_cpf_full_internal(update: Update, context: ContextTypes.DEFAULT_TY
         await send_log(context.application, f"[CPF_FULL FAIL] {cpf}")
         return
 
-    # merge/dedupe
     merged: Dict[str, Any] = {}
     for d in valid:
         if isinstance(d, dict):
@@ -654,7 +623,6 @@ async def cmd_cpf_full_internal(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    # generate file and send (delete ephemeral prior)
     txt_bytes = generate_txt_bytes(
         f"CPF_FULL_{cpf}", 
         merged, 
@@ -699,7 +667,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-# Generic menu handlers for commands that expect a value
 async def generic_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, field: str, options: List[Tuple[str,str]], title: str):
     parts = (update.message.text or "").split(maxsplit=1)
     if len(parts) < 2:
@@ -764,8 +731,152 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     awaiting = context.user_data.get("awaiting_input")
     if not awaiting:
-        # Fall back to auto-detection
         await text_detect_handler(update, context)
         return
     
-    context.user_data["last
+    context.user_data["last_query"] = text
+    context.user_data.pop("awaiting_input", None)
+    
+    if awaiting == "cpf":
+        await cmd_cpf_menu(update, context)
+    elif awaiting == "cpf_full":
+        context.user_data["last_query"] = text
+        await cmd_cpf_full_internal(update, context, text)
+    elif awaiting == "placa":
+        await cmd_placa(update, context)
+    elif awaiting == "cnh":
+        await cmd_cnh(update, context)
+    elif awaiting == "chassi":
+        await cmd_chassi(update, context)
+    elif awaiting == "ip":
+        await cmd_ip(update, context)
+    elif awaiting == "mac":
+        await cmd_mac(update, context)
+
+# Detect plain messages (auto-detect CPF/placa/ip/email/chassi)
+async def text_detect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+    dtype = detect_type(text)
+    if not dtype:
+        return
+    await delete_ephemeral(context.application, update.effective_chat.id)
+    context.user_data["last_query"] = text
+    context.user_data["last_query_title"] = dtype.upper()
+    
+    if dtype == "cpf":
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔎 Consultar CPF (Serasa)", callback_data="cpf_serasa")], 
+            [InlineKeyboardButton("📂 CPF FULL", callback_data="cpf_full")]
+        ])
+        sent = await context.application.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"🔍 Detectei CPF — <code>{text}</code>. Escolha:", 
+            parse_mode="HTML", 
+            reply_markup=kb
+        )
+        track_ephemeral(update.effective_chat.id, sent.message_id)
+    elif dtype == "placa":
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Consultar Placa", callback_data="placa_serpro")]])
+        sent = await context.application.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"🔍 Detectei Placa — <code>{text}</code>. Escolha:", 
+            parse_mode="HTML", 
+            reply_markup=kb
+        )
+        track_ephemeral(update.effective_chat.id, sent.message_id)
+    elif dtype == "chassi":
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Consultar Chassi", callback_data="chassi_serpro")]])
+        sent = await context.application.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"🔍 Detectei Chassi — <code>{text}</code>. Escolha:", 
+            parse_mode="HTML", 
+            reply_markup=kb
+        )
+        track_ephemeral(update.effective_chat.id, sent.message_id)
+    elif dtype == "ip":
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Consultar IP", callback_data="ip_api")]])
+        sent = await context.application.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"🔍 Detectei IP — <code>{text}</code>. Escolha:", 
+            parse_mode="HTML", 
+            reply_markup=kb
+        )
+        track_ephemeral(update.effective_chat.id, sent.message_id)
+    elif dtype == "email":
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Consultar E-mail", callback_data="email_serasa")]])
+        sent = await context.application.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"🔍 Detectei E-mail — <code>{text}</code>. Escolha:", 
+            parse_mode="HTML", 
+            reply_markup=kb
+        )
+        track_ephemeral(update.effective_chat.id, sent.message_id)
+
+# ---------------- Handlers registration ----------------
+def register_handlers(app: Application):
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("cpf", cmd_cpf_menu))
+    app.add_handler(CommandHandler("cpf_full", cmd_cpf_full))
+    app.add_handler(CommandHandler("nome", cmd_nome))
+    app.add_handler(CommandHandler("email", cmd_email))
+    app.add_handler(CommandHandler("telefone", cmd_telefone))
+    app.add_handler(CommandHandler("placa", cmd_placa))
+    app.add_handler(CommandHandler("cnh", cmd_cnh))
+    app.add_handler(CommandHandler("chassi", cmd_chassi))
+    app.add_handler(CommandHandler("ip", cmd_ip))
+    app.add_handler(CommandHandler("mac", cmd_mac))
+
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_input_handler))
+
+    logger.info("Handlers registrados com sucesso.")
+
+# ---------------- FastAPI webhook for Render ----------------
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+register_handlers(application)
+
+webhook_app = FastAPI()
+
+@webhook_app.on_event("startup")
+async def startup_event():
+    logger.info("Startup: checking API health and initializing bot")
+    await check_api_health()
+    try:
+        await application.initialize()
+        await application.start()
+        try:
+            await application.bot.send_message(chat_id=UPDATE_CHANNEL_ID, text=f"{BOT_DISPLAY_NAME} iniciado em {datetime.utcnow().isoformat()} UTC")
+        except Exception as e:
+            logger.warning(f"Announce update failed: {e}")
+        await send_log(application, f"{BOT_DISPLAY_NAME} iniciado em {datetime.utcnow().isoformat()} UTC")
+        logger.info("Bot Telegram iniciado")
+    except Exception as e:
+        logger.error(f"Erro ao iniciar bot: {e}")
+        await send_log(application, f"Erro ao iniciar bot: {e}")
+
+@webhook_app.post(f"/{TELEGRAM_TOKEN}")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
+
+async def set_webhook_on_render(application: Application, token: str):
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+    if not RENDER_EXTERNAL_URL:
+        logger.warning("RENDER_EXTERNAL_URL não configurada.")
+        return
+    webhook_url = f"{RENDER_EXTERNAL_URL}/{token}"
+    try:
+        await application.bot.delete_webhook()
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook configurado: {webhook_url}")
+    except Exception as e:
+        logger.warning(f"Failed to set webhook: {e}")
+
+# ---------------- Local entrypoint (polling) ----------------
+if __name__ == "__main__":
+    application.run_polling()
