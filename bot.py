@@ -768,14 +768,4 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await text_detect_handler(update, context)
         return
     
-    context.user_data["last_query"] = text
-    context.user_data.pop("awaiting_input", None)
-    
-    if awaiting == "cpf":
-        await cmd_cpf_menu(update, context)
-    elif awaiting == "cpf_full":
-        context.user_data["last_query"] = text
-        await cmd_cpf_full_internal(update, context, text)
-    elif awaiting == "placa":
-        await cmd_placa(update, context)
-   
+    context.user_data["last
