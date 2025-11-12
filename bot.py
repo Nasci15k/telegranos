@@ -391,12 +391,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     cleaned = clean_api_data(result)
-    textified_html = format_html(cleaned)
-    textified_txt = format_txt(cleaned)
+    textified_html = format_html(cleaned)  # ✅ AGORA SEMPRE USA HTML
+    textified_txt = format_txt(cleaned)    # ✅ SÓ PARA ARQUIVOS .TXT
     username_for_file = user.username or user.first_name or "usuario"
     summary = f"✅ Consulta concluída — tempo: {elapsed:.2f}s"
 
-    # if not too long, send as message; else send .txt
+    # ✅ CORREÇÃO: Agora textified_html SEMPRE é usado para mensagens de texto
+    # ✅ textified_txt só é usado para gerar arquivos .txt
     if textified_html and len(textified_html) <= 3500 and textified_html.strip():
         final_text = f"{summary}\n\n{textified_html}\n\n🤖 {BOT_DISPLAY_NAME}\n👤 @{username_for_file}"
         # replace ephemeral content with final
@@ -405,7 +406,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=ep.chat_id, 
                 message_id=ep.message_id, 
                 text=final_text, 
-                parse_mode="HTML"
+                parse_mode="HTML"  # ✅ IMPORTANTE: parse_mode HTML para aplicar a formatação
             )
             track_ephemeral(ep.chat_id, ep.message_id)
             await send_log(context.application, f"[OK] {username_for_file} {api_key} {query_value} ({elapsed:.2f}s)")
@@ -413,7 +414,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m = await context.application.bot.send_message(
                 chat_id=ep.chat_id, 
                 text=final_text, 
-                parse_mode="HTML"
+                parse_mode="HTML"  # ✅ IMPORTANTE: parse_mode HTML aqui também
             )
             track_ephemeral(m.chat_id, m.message_id)
             await send_log(context.application, f"[OK send] {username_for_file} {api_key} {query_value} ({elapsed:.2f}s)")
@@ -428,6 +429,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         
+        # ✅ Para arquivos .txt, continua usando format_txt
         txt_bytes = generate_txt_bytes(f"{api_key}_{query_value}", cleaned, username_for_file)
         bio = io.BytesIO(txt_bytes)
         bio.name = f"{api_key}_{query_value}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.txt"
