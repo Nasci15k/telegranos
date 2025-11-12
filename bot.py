@@ -1,17 +1,15 @@
 # bot.py
 """
-Icsan Search Bot - Versão 2.0 (final)
-Inclui:
-- /cpf_full (todas as 6 APIs de CPF) -> gera .txt consolidado
-- inline menu inteligente (detecta tipo do dado e sugere comandos)
-- logs automáticos em canal (LOG_CHANNEL_ID)
-- animação de mensagens (consultando -> processando -> resultado)
-- anúncio automático de atualização no canal (UPDATE_CHANNEL_ID)
-- remoção de FetchBrasil, SERPRO com retries/backoff
-- tratamento de respostas não-JSON (Expecting value)
-- cache simples, healthcheck de APIs no startup
-- limpeza de mensagens de usuário (se permitido)
-- webhook FastAPI para Render
+Icsan Search Bot - Atualizado
+Correções e melhorias:
+- /start funcionando
+- O bot apaga APENAS a última mensagem dele (por chat)
+- Healthcheck aprimorado: ícones 🟢 🟡 🔴 mostrados ao lado dos botões (estilo A)
+- Retries/backoff, timeout dinâmico, cache 15 min
+- Tratamento de respostas não-JSON (Expecting value)
+- /cpf_full consolidado e TXT limpo
+- Inline detection, animações, logs em canal, anúncio no startup
+- Compatível com Render (FastAPI + webhook)
 """
 
 import os
@@ -26,7 +24,6 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 from fastapi import FastAPI, Request
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -45,7 +42,6 @@ SUPORTE_USERNAME = "@astrahvhdev"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "SEU_TELEGRAM_TOKEN_AQUI")
 PORT = int(os.environ.get("PORT", 8000))
 
-# use provided group id as default; you can override via env vars
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "1003027034402"))
 UPDATE_CHANNEL_ID = int(os.environ.get("UPDATE_CHANNEL_ID", "1003027034402"))
 
@@ -76,13 +72,17 @@ logger = logging.getLogger("icsan_bot")
 
 # ---------------- GLOBALS ----------------
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "IcsanSearchBot/2.0"})
+SESSION.headers.update({"User-Agent": "IcsanSearchBot/2.1"})
 
 CACHE: Dict[str, Tuple[float, Any]] = {}  # key -> (expiry_timestamp, value)
-CACHE_TTL = 600  # 10 minutes
+CACHE_TTL = 900  # 15 minutes
 
-API_STATUS: Dict[str, bool] = {}
+# API_STATUS maps api_name -> dict { "icon": "🟢/🟡/🔴", "rt": avg_response_time_sec }
+API_STATUS: Dict[str, Dict[str, Any]] = {}
 FIELDS_TO_REMOVE = {"status", "message", "mensagem", "source", "token", "timestamp", "limit", "success", "code", "error"}
+
+# Track last bot message per chat to delete it (so we don't delete user messages)
+LAST_BOT_MESSAGE: Dict[int, int] = {}  # chat_id -> message_id
 
 # ---------------- UTILITIES ----------------
 def cache_get(key: str):
@@ -114,7 +114,11 @@ def fetch_api_with_retries(url: str, params: dict = None, timeout: int = 20, ret
     last_exc = None
     for attempt in range(retries + 1):
         try:
+            start = time.time()
             r = SESSION.get(url, params=params, timeout=timeout)
+            elapsed = time.time() - start
+            # update runtime info for health UI if endpoint string includes a known api name; not exact but ok
+            # handled elsewhere in dedicated healthchecks
             if r.status_code == 429:
                 wait = backoff[min(attempt, len(backoff)-1)]
                 logger.warning(f"429 from {url} - sleeping {wait}s (attempt {attempt+1})")
@@ -129,13 +133,14 @@ def fetch_api_with_retries(url: str, params: dict = None, timeout: int = 20, ret
             time.sleep(wait)
     return {"status": "ERROR", "message": f"Falha ao acessar API ({url}): {last_exc}"}
 
+# SERPRO fetch with cache and retries
 def fetch_serpro(tipo: str, valor: str) -> Any:
     key = f"serpro:{tipo}:{valor}"
     cached = cache_get(key)
     if cached:
         return cached
     params = {tipo: valor}
-    res = fetch_api_with_retries(BASE_URL_SERPRO, params=params, retries=3, backoff=[1,2,4])
+    res = fetch_api_with_retries(BASE_URL_SERPRO, params=params, retries=3, backoff=[1,2,4], timeout=12)
     cache_set(key, res, ttl=300)
     return res
 
@@ -144,7 +149,7 @@ def fetch_generic_apibrasil(endpoint: str, param_name: str, query: str) -> Any:
     cached = cache_get(key)
     if cached:
         return cached
-    res = fetch_api_with_retries(endpoint, params={param_name: query}, retries=2, backoff=[1,2])
+    res = fetch_api_with_retries(endpoint, params={param_name: query}, retries=2, backoff=[1,2], timeout=12)
     cache_set(key, res)
     return res
 
@@ -154,7 +159,7 @@ def fetch_ip_api(q: str) -> Any:
     if cached:
         return cached
     url = API_ENDPOINTS["ip_api"][0].format(q=q)
-    res = fetch_api_with_retries(url, timeout=10)
+    res = fetch_api_with_retries(url, timeout=8)
     cache_set(key, res)
     return res
 
@@ -164,7 +169,7 @@ def fetch_mac_api(q: str) -> Any:
     if cached:
         return cached
     url = API_ENDPOINTS["mac_api"][0].format(q=q)
-    res = fetch_api_with_retries(url, timeout=10)
+    res = fetch_api_with_retries(url, timeout=8)
     cache_set(key, res)
     return res
 
@@ -266,52 +271,110 @@ def generate_txt_bytes(title: str, data: Any, username: str) -> bytes:
     full_text = header + (formatted if formatted.strip() else "(sem campos relevantes)") + footer
     return full_text.encode("utf-8")
 
-# ---------------- HEALTHCHECK ----------------
-async def check_api_health():
-    for name, url, param in CPF_APIS:
-        try:
-            r = SESSION.get(url, params={param: "00000000000"}, timeout=5)
-            API_STATUS[name] = (r.status_code == 200 and bool(r.text.strip()))
-        except Exception as e:
-            API_STATUS[name] = False
-            logger.warning(f"Healthcheck fail for {name}: {e}")
+# ---------------- HEALTHCHECK (improved) ----------------
+def classify_response_time(rt_seconds: float) -> str:
+    # thresholds (tunable): <2s green, 2-6s yellow, >6s red
+    if rt_seconds < 2.0:
+        return "🟢"
+    if rt_seconds < 6.0:
+        return "🟡"
+    return "🔴"
 
+async def check_api_health():
+    # For each CPF API attempt a light call and capture response time; don't mark offline for single timeout; do retries
+    for name, url, param in CPF_APIS:
+        icon = "🔴"
+        avg_rt = None
+        ok = False
+        # try few attempts but keep them light
+        for attempt in range(2):
+            try:
+                start = time.time()
+                r = SESSION.get(url, params={param: "00000000000"}, timeout=6)
+                rt = time.time() - start
+                if r.status_code == 200 and r.text.strip():
+                    ok = True
+                    avg_rt = rt if avg_rt is None else (avg_rt + rt) / 2
+                else:
+                    # server returned something but not OK
+                    logger.debug(f"Health check returned status {r.status_code} for {url}")
+                    avg_rt = rt if avg_rt is None else (avg_rt + rt) / 2
+            except Exception as e:
+                logger.debug(f"Healthcheck attempt error for {name}: {e}")
+                # increase chance to mark slow but not necessarily offline
+                avg_rt = avg_rt if avg_rt else 10.0
+        if avg_rt is None:
+            # nothing succeeded at all — mark red
+            icon = "🔴"
+        else:
+            icon = classify_response_time(avg_rt)
+        API_STATUS[name] = {"icon": icon, "rt": avg_rt}
+    # SERPRO
     try:
-        r = SESSION.get(BASE_URL_SERPRO, timeout=5)
-        API_STATUS["serpro"] = (r.status_code == 200 and bool(r.text.strip()))
+        start = time.time()
+        r = SESSION.get(BASE_URL_SERPRO, timeout=6)
+        rt = time.time() - start
+        icon = classify_response_time(rt)
+        API_STATUS["serpro"] = {"icon": icon, "rt": rt}
     except Exception as e:
-        API_STATUS["serpro"] = False
+        API_STATUS["serpro"] = {"icon": "🔴", "rt": None}
         logger.warning(f"Healthcheck fail for serpro: {e}")
 
+    # ip-api
     try:
+        start = time.time()
         r = SESSION.get("http://ip-api.com/json/8.8.8.8", timeout=5)
-        API_STATUS["ip_api"] = (r.status_code == 200 and bool(r.text.strip()))
+        rt = time.time() - start
+        API_STATUS["ip_api"] = {"icon": classify_response_time(rt), "rt": rt}
     except Exception:
-        API_STATUS["ip_api"] = False
+        API_STATUS["ip_api"] = {"icon": "🔴", "rt": None}
 
+    # macvendors
     try:
+        start = time.time()
         r = SESSION.get("https://api.macvendors.com/00:00:00:00:00:00", timeout=5)
-        API_STATUS["mac_api"] = (r.status_code in (200, 204) and bool(r.text.strip()))
+        rt = time.time() - start
+        API_STATUS["mac_api"] = {"icon": classify_response_time(rt), "rt": rt}
     except Exception:
-        API_STATUS["mac_api"] = False
+        API_STATUS["mac_api"] = {"icon": "🔴", "rt": None}
 
+    # serasa name/email/credilink
     for key in ["serasanome", "serasaemail", "credilinktel"]:
         try:
             endpoint, param = API_ENDPOINTS[key]
-            r = SESSION.get(endpoint, params={param: "test"}, timeout=5)
-            API_STATUS[key] = (r.status_code == 200 and bool(r.text.strip()))
+            start = time.time()
+            r = SESSION.get(endpoint, params={param: "test"}, timeout=6)
+            rt = time.time() - start
+            API_STATUS[key] = {"icon": classify_response_time(rt), "rt": rt}
         except Exception:
-            API_STATUS[key] = False
+            API_STATUS[key] = {"icon": "🔴", "rt": None}
 
     logger.info(f"API status: {API_STATUS}")
 
 # ---------------- TELEGRAM HELPERS ----------------
-async def try_delete_message(msg):
+# track last bot message per chat
+def _set_last_bot_message(chat_id: int, message_id: int):
+    LAST_BOT_MESSAGE[chat_id] = message_id
+
+async def delete_last_bot_message(application: Application, chat_id: int):
+    mid = LAST_BOT_MESSAGE.get(chat_id)
+    if not mid:
+        return
     try:
-        if msg:
-            await msg.delete()
+        await application.bot.delete_message(chat_id=chat_id, message_id=mid)
+        LAST_BOT_MESSAGE.pop(chat_id, None)
     except Exception as e:
-        logger.debug(f"Could not delete message: {e}")
+        logger.debug(f"Could not delete last bot message in chat {chat_id}: {e}")
+
+async def send_and_track(application: Application, chat_id: int, text: str, **kwargs):
+    """Sends a message and records it as the last bot message for that chat."""
+    msg = await application.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    _set_last_bot_message(chat_id, msg.message_id)
+    return msg
+
+async def try_delete_user_message_safe(update: Update):
+    """Deprecated: we no longer delete user messages. Keep for compatibility (no-op)."""
+    return
 
 async def notify_log_channel(application: Application, text: str):
     try:
@@ -333,51 +396,61 @@ async def announce_update(application: Application):
 # ---------------- DETECTION (inline menu) ----------------
 def detect_data_type(query: str) -> str:
     q = query.strip()
-    # CPF: 11 digits (optionally with punctuation)
     cpf_plain = re.sub(r"\D", "", q)
     if re.fullmatch(r"\d{11}", cpf_plain):
         return "cpf"
-    # placa brasileiro pattern (7 chars, letters+digits) simplified
     if re.fullmatch(r"[A-Za-z]{3}\d{4}", q.replace("-", "").replace(" ", "").upper()):
         return "placa"
-    # chassi: 17 chars alnum
     if re.fullmatch(r"[A-Za-z0-9]{17}", q):
         return "chassi"
-    # IP
     if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", q):
         return "ip"
-    # email
     if "@" in q and "." in q:
         return "email"
-    # default
     return ""
 
-# ---------------- MENU + BUTTONS ----------------
+# ---------------- MENU HANDLER (shows icons only - style A) ----------------
 async def menu_query_handler_generic(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, options: List[Tuple[str, str]]):
-    await try_delete_message(update.message)
+    # delete last bot message for a clean view
+    await delete_last_bot_message(context.application, update.effective_chat.id)
     text = update.message.text if update.message else ""
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
-        await update.effective_message.reply_text(f"⚠️ Por favor informe o {title}. Exemplo: /{title.lower()} 123")
+        msg = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Por favor informe o {title}. Exemplo: /{title.lower()} 123")
+        _set_last_bot_message(update.effective_chat.id, msg.message_id)
         return
     query = parts[1].strip()
     context.user_data["last_query"] = query
     context.user_data["last_query_title"] = title
+
     keyboard = []
     for label, api_key in options:
-        offline = False
+        icon = "🟢"  # default
+        # mapping from api_key to API_STATUS keys
+        status_key = None
         if api_key.startswith("api_"):
-            offline = not API_STATUS.get(api_key.replace("api_", ""), True)
-        btn_label = label + (" (offline)" if offline else "")
+            status_key = api_key.replace("api_", "")
+        else:
+            status_key = api_key
+        status = API_STATUS.get(status_key)
+        if status and isinstance(status, dict):
+            icon = status.get("icon", "🔴")
+        # button text = icon + space + label (we show only icon + label)
+        btn_label = f"{icon} {label}"
         keyboard.append([InlineKeyboardButton(btn_label, callback_data=api_key)])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.effective_message.reply_text(f"Selecione a fonte para consultar *{title}* `{query}`:", parse_mode="Markdown", reply_markup=reply_markup)
+    msg = await context.application.bot.send_message(chat_id=update.effective_chat.id,
+                                    text=f"Selecione a fonte para consultar *{title}* `{query}`:",
+                                    parse_mode="Markdown",
+                                    reply_markup=reply_markup)
+    _set_last_bot_message(update.effective_chat.id, msg.message_id)
 
 # ---------------- BUTTON CALLBACK ----------------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     api_key = q.data
+    # keep last_query and title from context
     query = context.user_data.get("last_query")
     title = context.user_data.get("last_query_title", "Consulta")
     user = update.effective_user
@@ -385,15 +458,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Sessão expirada. Reinicie com o comando.")
         return
 
-    # Animated message sequence
-    await q.edit_message_text("🔍 Consultando...")
+    # delete previous bot message to avoid duplicates
+    await delete_last_bot_message(context.application, update.effective_chat.id)
+
+    # animated steps: send a tracked message and then edit it
+    status_msg = await send_and_track(context.application, update.effective_chat.id, f"🔍 Consultando `{query}` — fonte: {api_key}...")
     await asyncio.sleep(0.8)
-    await q.edit_message_text("📊 Processando dados...")
+    try:
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="📊 Processando dados...")
+    except Exception:
+        pass
     await asyncio.sleep(0.6)
 
     start_ts = time.time()
     data = None
-
     try:
         if api_key == "api_serasacpf":
             data = await asyncio.to_thread(fetch_generic_apibrasil, CPF_APIS[0][1], CPF_APIS[0][2], query)
@@ -409,30 +487,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = await asyncio.to_thread(fetch_generic_apibrasil, CPF_APIS[5][1], CPF_APIS[5][2], query)
 
         elif api_key == "api_serpro_placa":
-            if not API_STATUS.get("serpro", True):
-                await q.edit_message_text("⚠️ A API Serpro (Radar) está temporariamente indisponível.")
-                return
             data = await asyncio.to_thread(fetch_serpro, "placa", query)
         elif api_key == "api_serpro_cnh":
-            if not API_STATUS.get("serpro", True):
-                await q.edit_message_text("⚠️ A API Serpro (Radar) está temporariamente indisponível.")
-                return
             data = await asyncio.to_thread(fetch_serpro, "cnh", query)
         elif api_key == "api_serpro_chassi":
-            if not API_STATUS.get("serpro", True):
-                await q.edit_message_text("⚠️ A API Serpro (Radar) está temporariamente indisponível.")
-                return
             data = await asyncio.to_thread(fetch_serpro, "chassi", query)
 
         elif api_key == "api_ip":
-            if not API_STATUS.get("ip_api", True):
-                await q.edit_message_text("⚠️ A API de IP está temporariamente indisponível.")
-                return
             data = await asyncio.to_thread(fetch_ip_api, query)
         elif api_key == "api_mac":
-            if not API_STATUS.get("mac_api", True):
-                await q.edit_message_text("⚠️ A API de MAC está temporariamente indisponível.")
-                return
             data = await asyncio.to_thread(fetch_mac_api, query)
 
         elif api_key == "api_serasanome":
@@ -445,67 +508,85 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             endpoint, param = API_ENDPOINTS["credilinktel"]
             data = await asyncio.to_thread(fetch_generic_apibrasil, endpoint, param, query)
         else:
-            await q.edit_message_text("API desconhecida.")
+            await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="API desconhecida.")
             return
     except Exception as e:
-        await q.edit_message_text(f"❌ Erro interno: {e}")
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=f"❌ Erro interno: {e}")
         await notify_log_channel(context.application, f"❌ Erro interno no button_callback: {e}")
         return
 
     elapsed = time.time() - start_ts
 
     if not data:
-        await q.edit_message_text("❌ Erro desconhecido ao consultar a API.")
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="❌ Erro desconhecido ao consultar a API.")
         await notify_log_channel(context.application, f"❌ Erro: API retornou nada para {api_key} / {query}")
         return
     if isinstance(data, dict) and data.get("status") == "ERROR":
         msg = data.get("message", "Erro na API")
-        await q.edit_message_text(f"❌ Erro na consulta: {msg}")
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=f"❌ Erro na consulta: {msg}")
         await notify_log_channel(context.application, f"❌ Erro API {api_key} para `{query}`: {msg}")
         return
 
-    # Prepare cleaned output and file
     cleaned = clean_api_data(data)
     cleaned_str = format_txt(cleaned)
     user_display = user.username if user.username else user.first_name
-    summary = f"✅ Consulta concluída ({api_key})\n⏱️ Tempo de consulta: {elapsed:.2f}s\n"
+    summary = f"✅ Consulta concluída\n⏱️ Tempo de consulta: {elapsed:.2f}s\n"
 
-    # If small enough, send as message; else send txt file
     if len(cleaned_str) <= 3500 and cleaned_str.strip():
-        await q.edit_message_text(f"{summary}\n{cleaned_str}\n\n🤖 {BOT_USERNAME}\n👤 @{user_display}", parse_mode="Markdown")
+        # edit the status message into the final message
+        final_text = f"{summary}\n{cleaned_str}\n\n🤖 {BOT_USERNAME}\n👤 @{user_display}"
+        try:
+            await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=final_text, parse_mode="Markdown")
+            _set_last_bot_message(status_msg.chat_id, status_msg.message_id)
+        except Exception:
+            # fallback to sending new message
+            try:
+                msg = await context.application.bot.send_message(chat_id=status_msg.chat_id, text=final_text, parse_mode="Markdown")
+                _set_last_bot_message(status_msg.chat_id, msg.message_id)
+            except Exception as e:
+                logger.warning(f"Failed to send final text: {e}")
     else:
-        await q.edit_message_text(summary + "\n📄 Resultado extenso. Enviando arquivo .txt...")
+        # send file
+        try:
+            await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=summary + "\n📄 Resultado extenso. Enviando arquivo .txt...")
+        except Exception:
+            pass
         txt_bytes = generate_txt_bytes(f"{title} {query}", cleaned, user_display)
         bio = io.BytesIO(txt_bytes)
         bio.name = f"{title}_{query}.txt"
         try:
-            await q.message.reply_document(document=bio, filename=bio.name,
-                                           caption=f"✅ Resultado completo — {title} {query}\n\n🤖 {BOT_USERNAME}\n👤 @{user_display}")
+            sent = await context.application.bot.send_document(chat_id=status_msg.chat_id, document=bio, filename=bio.name,
+                                                caption=f"✅ Resultado completo — {title} {query}\n\n🤖 {BOT_USERNAME}\n👤 @{user_display}")
+            _set_last_bot_message(status_msg.chat_id, sent.message_id)
         except Exception as e:
-            await q.edit_message_text(f"❌ Erro ao enviar arquivo: {e}")
+            await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=f"❌ Erro ao enviar arquivo: {e}")
             await notify_log_channel(context.application, f"❌ Falha ao enviar arquivo txt para {user_display}: {e}")
 
 # ---------------- CPF_FULL Handler ----------------
 async def cmd_cpf_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await try_delete_message(update.message)
+    # do NOT delete user messages; delete last bot message for cleaner UI
+    await delete_last_bot_message(context.application, update.effective_chat.id)
     parts = (update.message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await update.effective_message.reply_text("⚠️ Informe o CPF. Exemplo: /cpf_full 12345678900")
+        msg = await context.application.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Informe o CPF. Exemplo: /cpf_full 12345678900")
+        _set_last_bot_message(update.effective_chat.id, msg.message_id)
         return
     cpf = re.sub(r"\D", "", parts[1].strip())
     user = update.effective_user
-    status_msg = await update.effective_message.reply_text(f"🔍 Iniciando CPF_FULL para `{cpf}`...\n⏳ Consultando várias fontes...", parse_mode="Markdown")
+    status_msg = await send_and_track(context.application, update.effective_chat.id, f"🔍 Iniciando CPF_FULL para `{cpf}`...\n⏳ Consultando várias fontes...", parse_mode="Markdown")
 
     start_ts = time.time()
     tasks = []
     for name, url, param in CPF_APIS:
-        if not API_STATUS.get(name, True):
-            logger.info(f"Skipping {name} because offline")
-            continue
+        status = API_STATUS.get(name, {"icon": "🔴"})
+        # allow task even if slow; prefer to try if icon is not red OR even if red but we want to attempt
+        if status.get("icon") == "🔴":
+            # still try but don't fail early
+            pass
         tasks.append(asyncio.to_thread(fetch_generic_apibrasil, url, param, cpf))
 
     if not tasks:
-        await status_msg.edit_text("⚠️ Nenhuma API de CPF disponível no momento. Tente novamente mais tarde.")
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="⚠️ Nenhuma API de CPF disponível no momento. Tente novamente mais tarde.")
         return
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -520,7 +601,7 @@ async def cmd_cpf_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valid.append(r)
 
     if not valid:
-        await status_msg.edit_text("❌ Todas as APIs retornaram erro ou não retornaram dados.")
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="❌ Todas as APIs retornaram erro ou não retornaram dados.")
         await notify_log_channel(context.application, f"❌ CPF_FULL: todas as APIs falharam para {cpf}")
         return
 
@@ -528,28 +609,32 @@ async def cmd_cpf_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
     merged = merge_results(cleaned_list)
     elapsed = time.time() - start_ts
 
-    # short summary
     short = "Resultado consolidado pronto."
     for key in ("nome", "name", "Nome", "Name"):
         if key in merged:
             short = f"Nome: {merged[key]}"
             break
     summary_text = f"✅ CPF_FULL concluído\n⏱️ Tempo de consulta: {elapsed:.2f}s\n{short}"
-    await status_msg.edit_text(summary_text)
+    try:
+        await context.application.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=summary_text)
+    except Exception:
+        pass
 
     txt_bytes = generate_txt_bytes(f"CPF_FULL_{cpf}", merged, user.username if user.username else user.first_name)
     bio = io.BytesIO(txt_bytes)
     bio.name = f"CPF_FULL_{cpf}.txt"
     try:
-        await update.effective_message.reply_document(document=bio, filename=bio.name,
+        sent = await context.application.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename=bio.name,
             caption=f"✅ Resultado CPF_FULL — {cpf}\n\n🤖 {BOT_USERNAME}\n👤 @{user.username if user.username else user.first_name}")
+        _set_last_bot_message(update.effective_chat.id, sent.message_id)
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Erro ao enviar arquivo: {e}")
+        await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Erro ao enviar arquivo: {e}")
         await notify_log_channel(context.application, f"❌ Falha ao enviar CPF_FULL txt: {e}")
 
 # ---------------- SIMPLE COMMANDS ----------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await try_delete_message(update.message)
+    # delete last bot message for clean UI
+    await delete_last_bot_message(context.application, update.effective_chat.id)
     keyboard = [[InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{SUPORTE_USERNAME.replace('@','')}")]]
     text = (
         f"👋 Bem-vindo ao *{BOT_NAME}*\n\n"
@@ -566,13 +651,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /telefone `<telefone>`\n\n"
         f"📞 Suporte: {SUPORTE_USERNAME}"
     )
-    await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    msg = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    _set_last_bot_message(update.effective_chat.id, msg.message_id)
 
 async def cmd_suporte(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await try_delete_message(update.message)
-    await update.effective_message.reply_text(f"💬 Suporte: {SUPORTE_USERNAME}")
+    await delete_last_bot_message(context.application, update.effective_chat.id)
+    msg = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"💬 Suporte: {SUPORTE_USERNAME}")
+    _set_last_bot_message(update.effective_chat.id, msg.message_id)
 
-# wrappers to open menu
+# wrapper commands
 async def cmd_cpf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     options = [
         ("Serasa", "api_serasacpf"),
@@ -618,47 +705,47 @@ async def cmd_telefone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- INLINE DETECTION HANDLER ----------------
 async def text_handler_detect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # if user types plain text (not command), detect and propose actions
     text = (update.message.text or "").strip()
     if not text:
         return
     dtype = detect_data_type(text)
     if not dtype:
         return
-    await try_delete_message(update.message)
-    user = update.effective_user
+    # delete last bot message for clean UI
+    await delete_last_bot_message(context.application, update.effective_chat.id)
     if dtype == "cpf":
         keyboard = [
             [InlineKeyboardButton("🔎 Consultar CPF", callback_data="api_serasacpf")],
-            [InlineKeyboardButton("📂 CPF FULL", callback_data="cpf_full_inline")]
+            [InlineKeyboardButton("📂 CPF FULL", callback_data="cpf_full_quick")]
         ]
-        msg = f"🔍 Detectei um *CPF* — `{text}`. O que deseja fazer?"
-        await update.effective_chat.send_message(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        # store last query
+        sent = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"🔍 Detectei um *CPF* — `{text}`. Escolha uma opção:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        _set_last_bot_message(update.effective_chat.id, sent.message_id)
         context.user_data["last_query"] = re.sub(r"\D", "", text)
         context.user_data["last_query_title"] = "CPF"
     elif dtype == "placa":
         keyboard = [
             [InlineKeyboardButton("🔎 Consultar Placa", callback_data="api_serpro_placa")]
         ]
-        msg = f"🔍 Detectei uma *Placa* — `{text}`. O que deseja fazer?"
-        await update.effective_chat.send_message(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        sent = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"🔍 Detectei uma Placa — `{text}`. Escolha:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        _set_last_bot_message(update.effective_chat.id, sent.message_id)
         context.user_data["last_query"] = text
         context.user_data["last_query_title"] = "Placa"
     elif dtype == "chassi":
         keyboard = [[InlineKeyboardButton("🔎 Consultar Chassi", callback_data="api_serpro_chassi")]]
-        msg = f"🔍 Detectei um *Chassi* — `{text}`. O que deseja fazer?"
-        await update.effective_chat.send_message(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        sent = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"🔍 Detectei um Chassi — `{text}`. Escolha:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        _set_last_bot_message(update.effective_chat.id, sent.message_id)
         context.user_data["last_query"] = text
         context.user_data["last_query_title"] = "Chassi"
     elif dtype == "ip":
         keyboard = [[InlineKeyboardButton("🔎 Consultar IP", callback_data="api_ip")]]
-        await update.effective_chat.send_message(f"🔍 Detectei IP — `{text}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        sent = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"🔍 Detectei IP — `{text}`. Escolha:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        _set_last_bot_message(update.effective_chat.id, sent.message_id)
         context.user_data["last_query"] = text
         context.user_data["last_query_title"] = "IP"
     elif dtype == "email":
         keyboard = [[InlineKeyboardButton("🔎 Consultar E-mail", callback_data="api_serasaemail")]]
-        await update.effective_chat.send_message(f"🔍 Detectei E-mail — `{text}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        sent = await context.application.bot.send_message(chat_id=update.effective_chat.id, text=f"🔍 Detectei E-mail — `{text}`. Escolha:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        _set_last_bot_message(update.effective_chat.id, sent.message_id)
         context.user_data["last_query"] = text
         context.user_data["last_query_title"] = "Email"
 
@@ -677,7 +764,6 @@ def register_handlers(app: Application):
     app.add_handler(CommandHandler("email", cmd_email))
     app.add_handler(CommandHandler("telefone", cmd_telefone))
     app.add_handler(CallbackQueryHandler(button_callback))
-    # detect plain text (not commands)
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler_detect))
     logger.info("Handlers registrados com sucesso.")
 
@@ -689,14 +775,15 @@ webhook_app = FastAPI()
 
 @webhook_app.on_event("startup")
 async def startup_event():
-    logger.info("Inicializando Icsan Search...")
-    # do healthcheck in thread
+    logger.info("Inicializando Icsan Search (startup)...")
+    # healthcheck
     await asyncio.to_thread(lambda: logger.info("Starting API healthcheck..."))
     await check_api_health()
-    # announce update
+    # init bot
     try:
         await application.initialize()
         await application.start()
+        # announce update
         await announce_update(application)
         await notify_log_channel(application, f"✅ Bot iniciado com sucesso em {datetime.utcnow().isoformat()} UTC")
         logger.info("Bot Telegram iniciado.")
@@ -723,5 +810,4 @@ async def set_webhook_on_render(application: Application, token: str):
 
 # ---------------- Entrypoint ----------------
 if __name__ == "__main__":
-    # local polling fallback
     asyncio.run(application.run_polling())
